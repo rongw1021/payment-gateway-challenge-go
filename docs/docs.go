@@ -15,16 +15,906 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
-        "/ping": {
-            "get": {
-                "produces": [
+        "/api/CardTokens": {
+            "post": {
+                "security": [
+                    {
+                        "ApiKey": []
+                    }
+                ],
+                "description": "**Required scope:** ` + "`" + `card-tokens:create` + "`" + `\n\n### Token lifecycle\n- Tokens are lowercase, hyphenated ` + "`" + `UUIDv7` + "`" + ` strings.\n- Each token belongs to the authenticated merchant and expires exactly **15 minutes** after issuance.\n- Supply the single-use token when confirming a payment intent.\n\n### Card details\n- Card numbers and CVVs must contain **ASCII digits**.\n- The expiry month and year must not be in the past.",
+                "consumes": [
                     "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/problem+json"
+                ],
+                "tags": [
+                    "Cards"
+                ],
+                "summary": "Exchange card details for a single-use payment token.",
+                "operationId": "createCardToken",
+                "parameters": [
+                    {
+                        "description": "Card details",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.CreateCardTokenRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Single-use token and expiry timestamp",
+                        "schema": {
+                            "$ref": "#/definitions/models.CardTokenResponse"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Malformed JSON or invalid/expired card details",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "WWW-Authenticate": {
+                                "type": "string",
+                                "description": "Bearer"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "413": {
+                        "description": "Request body exceeds 1 MiB",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "415": {
+                        "description": "Content-Type must be application/json",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Global request limit exceeded",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "Retry-After": {
+                                "type": "integer",
+                                "description": "1 (wait one second before retrying)"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/PaymentIntents": {
+            "post": {
+                "security": [
+                    {
+                        "ApiKey": []
+                    }
+                ],
+                "description": "**Required scope:** ` + "`" + `payment-intents:create` + "`" + `\n\n### Creation\n- Record the payment intent without contacting the bank.\n- Return **201 Created** with the current intent, transaction history, and a ` + "`" + `Location` + "`" + ` lookup URL.\n\n### Idempotent replay\n- The same merchant, idempotency key, currency, and amount return the current intent and history with **201 Created** and the same ` + "`" + `Location` + "`" + `.\n- A changed amount or currency under the same key returns **409 Conflict**.\n- Creation and confirmation use **separate idempotency-key namespaces**.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/problem+json"
+                ],
+                "tags": [
+                    "Payment intents"
+                ],
+                "summary": "Create a payment intent without submitting a payment to the bank.",
+                "operationId": "createPaymentIntent",
+                "parameters": [
+                    {
+                        "maxLength": 36,
+                        "minLength": 36,
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Lowercase hyphenated GUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)",
+                        "name": "X-Idempotency-Key",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "description": "Intent details",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.CreatePaymentIntentRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created intent, or current state on an idempotent replay",
+                        "schema": {
+                            "$ref": "#/definitions/models.PaymentIntentResponse"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Location": {
+                                "type": "string",
+                                "description": "Relative payment-intent lookup URL, also returned on replay"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid JSON, intent details, or idempotency key",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "WWW-Authenticate": {
+                                "type": "string",
+                                "description": "Bearer"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Idempotency key reused with different intent details",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "413": {
+                        "description": "Request body exceeds 1 MiB",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "415": {
+                        "description": "Content-Type must be application/json",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Global request limit exceeded",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "Retry-After": {
+                                "type": "integer",
+                                "description": "1 (wait one second before retrying)"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/PaymentIntents/{paymentIntentId}": {
+            "get": {
+                "security": [
+                    {
+                        "ApiKey": []
+                    }
+                ],
+                "description": "**Required scope:** ` + "`" + `payment-intents:read` + "`" + `\n\n### Response\n- Return **200 OK** with the merchant-owned intent's current state and complete transaction history, **oldest first**.\n- A new intent has an empty transaction history.\n- Malformed, missing, or foreign intent IDs return **404 Not Found**.",
+                "produces": [
+                    "application/json",
+                    "application/problem+json"
+                ],
+                "tags": [
+                    "Payment intents"
+                ],
+                "summary": "Retrieve the current state of a merchant-owned payment intent.",
+                "operationId": "getPaymentIntent",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Payment intent UUID",
+                        "name": "paymentIntentId",
+                        "in": "path",
+                        "required": true
+                    }
                 ],
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/main.Pong"
+                            "$ref": "#/definitions/models.PaymentIntentResponse"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "WWW-Authenticate": {
+                                "type": "string",
+                                "description": "Bearer"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Intent ID is malformed, missing, or owned by another merchant",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Global request limit exceeded",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "Retry-After": {
+                                "type": "integer",
+                                "description": "1 (wait one second before retrying)"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/PaymentIntents/{paymentIntentId}/confirm": {
+            "post": {
+                "security": [
+                    {
+                        "ApiKey": []
+                    }
+                ],
+                "description": "**Required scope:** ` + "`" + `payment-intents:confirm` + "`" + `\n\n### New attempts\n- Allowed only when the intent is ` + "`" + `Created` + "`" + ` or ` + "`" + `Declined` + "`" + `.\n- Consume a merchant-owned, single-use card token.\n\n### Idempotent replay\n- Reuse the same idempotency key, intent, and card token, even after token expiry.\n- Matching replays reuse the attempt and follow the **current intent state**, not a cached original response.\n\n### Response states\n- **200 OK:** ` + "`" + `Authorized` + "`" + ` or ` + "`" + `Declined` + "`" + `, with the complete transaction history.\n- **202 Accepted:** ` + "`" + `PendingVerification` + "`" + `, with complete history and a ` + "`" + `Location` + "`" + ` lookup URL.\n- **409 Conflict:** The attempt is still ` + "`" + `Processing` + "`" + `, the intent cannot start another attempt, or the idempotency key conflicts.\n\n\u003e **Pending verification:** A ` + "`" + `202` + "`" + ` response is not an authorization or a decline and does not guarantee eventual verification or success.\n\u003e **Do not retry with a new idempotency key.** Use the ` + "`" + `Location` + "`" + ` URL to retrieve the current intent.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "application/problem+json"
+                ],
+                "tags": [
+                    "Payment intents"
+                ],
+                "summary": "Confirm a payment intent using a single-use card token.",
+                "operationId": "confirmPaymentIntent",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Payment intent UUID",
+                        "name": "paymentIntentId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "maxLength": 36,
+                        "minLength": 36,
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Lowercase hyphenated GUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)",
+                        "name": "X-Idempotency-Key",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "description": "Single-use card token",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.ConfirmPaymentIntentRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Authorized or Declined intent with its complete transaction history",
+                        "schema": {
+                            "$ref": "#/definitions/models.PaymentIntentResponse"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "202": {
+                        "description": "Accepted confirmation with an unconfirmed bank outcome and complete transaction history",
+                        "schema": {
+                            "$ref": "#/definitions/models.PaymentIntentResponse"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Location": {
+                                "type": "string",
+                                "description": "Relative payment-intent lookup URL, also returned on pending-verification replay"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid request/key or invalid, expired, consumed, or foreign card token",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "WWW-Authenticate": {
+                                "type": "string",
+                                "description": "Bearer"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Intent ID is malformed, missing, or owned by another merchant",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Idempotency conflict, intent cannot be paid, or attempt is still Processing",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "413": {
+                        "description": "Request body exceeds 1 MiB",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "415": {
+                        "description": "Content-Type must be application/json",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Global request limit exceeded",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "Retry-After": {
+                                "type": "integer",
+                                "description": "1 (wait one second before retrying)"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/ping": {
+            "get": {
+                "description": "- **Authentication:** Public endpoint; no API key is required.\n- **Rate limit:** Exempt from the global rate limit.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Health"
+                ],
+                "summary": "Check gateway liveness.",
+                "operationId": "ping",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.pong"
                         }
                     }
                 }
@@ -32,30 +922,327 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "main.Pong": {
+        "api.pong": {
             "type": "object",
+            "required": [
+                "message"
+            ],
             "properties": {
                 "message": {
+                    "type": "string",
+                    "example": "pong"
+                }
+            }
+        },
+        "models.BankTransactionResponse": {
+            "type": "object",
+            "required": [
+                "bank_transaction_id",
+                "card_number_last_four",
+                "completed_at",
+                "created_at",
+                "expiry_month",
+                "expiry_year",
+                "status"
+            ],
+            "properties": {
+                "bank_transaction_id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "card_number_last_four": {
+                    "type": "string",
+                    "maxLength": 4,
+                    "minLength": 4,
+                    "example": "0007"
+                },
+                "completed_at": {
+                    "description": "Null while Scheduled, including an in-flight bank request.",
+                    "type": "string",
+                    "format": "date-time",
+                    "x-nullable": true
+                },
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "expiry_month": {
+                    "type": "integer",
+                    "maximum": 12,
+                    "minimum": 1,
+                    "example": 4
+                },
+                "expiry_year": {
+                    "type": "integer",
+                    "maximum": 9999,
+                    "minimum": 1,
+                    "example": 2099
+                },
+                "status": {
+                    "$ref": "#/definitions/models.BankTransactionStatus"
+                }
+            }
+        },
+        "models.BankTransactionStatus": {
+            "type": "string",
+            "enum": [
+                "Scheduled",
+                "Authorized",
+                "Declined",
+                "RequestTimeout",
+                "StatusUpdateTimeout",
+                "ServiceUnavailable",
+                "NetworkError",
+                "InvalidResponse",
+                "RequestCanceled"
+            ],
+            "x-enum-varnames": [
+                "BankTransactionScheduled",
+                "BankTransactionAuthorized",
+                "BankTransactionDeclined",
+                "BankTransactionRequestTimeout",
+                "BankTransactionStatusUpdateTimeout",
+                "BankTransactionServiceUnavailable",
+                "BankTransactionNetworkError",
+                "BankTransactionInvalidResponse",
+                "BankTransactionRequestCanceled"
+            ]
+        },
+        "models.CardTokenResponse": {
+            "type": "object",
+            "required": [
+                "expires_at",
+                "request_id",
+                "token"
+            ],
+            "properties": {
+                "expires_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "request_id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "token": {
+                    "description": "Merchant-owned, single-use, canonical UUIDv7.",
+                    "type": "string",
+                    "format": "uuid",
+                    "example": "01900000-0000-7000-8000-000000000001"
+                }
+            }
+        },
+        "models.ConfirmPaymentIntentRequest": {
+            "type": "object",
+            "required": [
+                "card_token"
+            ],
+            "properties": {
+                "card_token": {
+                    "description": "Use a token returned by /api/CardTokens, in lowercase hyphenated UUID format.",
+                    "type": "string",
+                    "format": "uuid",
+                    "maxLength": 36,
+                    "minLength": 36,
+                    "example": "01900000-0000-7000-8000-000000000001"
+                }
+            }
+        },
+        "models.CreateCardTokenRequest": {
+            "type": "object",
+            "required": [
+                "card_number",
+                "cvv",
+                "expiry_month",
+                "expiry_year"
+            ],
+            "properties": {
+                "card_number": {
+                    "description": "Between 14 and 19 ASCII digits; the example is a synthetic simulator card.",
+                    "type": "string",
+                    "maxLength": 19,
+                    "minLength": 14,
+                    "example": "0222405343240007"
+                },
+                "cvv": {
+                    "description": "Three or four ASCII digits.",
+                    "type": "string",
+                    "maxLength": 4,
+                    "minLength": 3,
+                    "example": "012"
+                },
+                "expiry_month": {
+                    "description": "The combined month/year must not be in the past; the current month is accepted.",
+                    "type": "integer",
+                    "maximum": 12,
+                    "minimum": 1,
+                    "example": 4
+                },
+                "expiry_year": {
+                    "type": "integer",
+                    "maximum": 9999,
+                    "minimum": 1,
+                    "example": 2099
+                }
+            }
+        },
+        "models.CreatePaymentIntentRequest": {
+            "type": "object",
+            "required": [
+                "amount",
+                "currency"
+            ],
+            "properties": {
+                "amount": {
+                    "description": "Positive amount in the currency's minor unit.",
+                    "type": "integer",
+                    "format": "int32",
+                    "maximum": 2147483647,
+                    "minimum": 1,
+                    "example": 100
+                },
+                "currency": {
+                    "type": "string",
+                    "enum": [
+                        "GBP",
+                        "USD",
+                        "EUR"
+                    ],
+                    "example": "GBP"
+                }
+            }
+        },
+        "models.PaymentIntentResponse": {
+            "type": "object",
+            "required": [
+                "amount",
+                "bank_transactions",
+                "currency",
+                "payment_intent_id",
+                "request_id",
+                "status"
+            ],
+            "properties": {
+                "amount": {
+                    "type": "integer",
+                    "format": "int32",
+                    "maximum": 2147483647,
+                    "minimum": 1,
+                    "example": 100
+                },
+                "bank_transactions": {
+                    "description": "Complete history, oldest first; empty rather than null before the first attempt.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/models.BankTransactionResponse"
+                    }
+                },
+                "currency": {
+                    "type": "string",
+                    "enum": [
+                        "GBP",
+                        "USD",
+                        "EUR"
+                    ],
+                    "example": "GBP"
+                },
+                "payment_intent_id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "request_id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "status": {
+                    "$ref": "#/definitions/models.PaymentIntentStatus"
+                }
+            }
+        },
+        "models.PaymentIntentStatus": {
+            "type": "string",
+            "enum": [
+                "Created",
+                "Processing",
+                "Authorized",
+                "Declined",
+                "PendingVerification"
+            ],
+            "x-enum-varnames": [
+                "PaymentIntentCreated",
+                "PaymentIntentProcessing",
+                "PaymentIntentAuthorized",
+                "PaymentIntentDeclined",
+                "PaymentIntentPendingVerification"
+            ]
+        },
+        "models.ProblemDetails": {
+            "type": "object",
+            "required": [
+                "request_id",
+                "status",
+                "title"
+            ],
+            "properties": {
+                "bank_transaction_id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "bank_transaction_status": {
+                    "$ref": "#/definitions/models.BankTransactionStatus"
+                },
+                "detail": {
+                    "type": "string"
+                },
+                "errors": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "payment_intent_id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "payment_intent_status": {
+                    "$ref": "#/definitions/models.PaymentIntentStatus"
+                },
+                "request_id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "status": {
+                    "type": "integer",
+                    "maximum": 599,
+                    "minimum": 400
+                },
+                "title": {
                     "type": "string"
                 }
             }
         }
     },
     "securityDefinitions": {
-        "BasicAuth": {
-            "type": "basic"
+        "ApiKey": {
+            "description": "Enter the full ` + "`" + `Bearer sk_\u003cpayload\u003e` + "`" + ` value. This is an **API key**, not JWT or HTTP Basic authentication.",
+            "type": "apiKey",
+            "name": "Authorization",
+            "in": "header"
         }
     }
 }`
 
 // SwaggerInfo holds exported Swagger Info so clients can modify it
 var SwaggerInfo = &swag.Spec{
-	Version:          "",
-	Host:             "localhost:8090",
+	Version:          "dev",
+	Host:             "",
 	BasePath:         "/",
 	Schemes:          []string{},
 	Title:            "Payment Gateway Challenge Go",
-	Description:      "Interview challenge for building a Payment Gateway - Go version",
+	Description:      "Merchant-scoped card tokenization and payment intents with **idempotent confirmation** and bank transaction history.\n\n### Authentication\n- Send `Authorization: Bearer sk_<payload>` on card-token and payment-intent requests.\n- Use an **API key** with the required endpoint scope.\n\n### Requests and responses\n- POST bodies must be single JSON objects no larger than **1 MiB**.\n- Success responses use `application/json`; errors use `application/problem+json`.\n- Payment endpoints return a fresh `X-Request-Id` and disable response caching.\n\n### Rate limiting\n- A configurable global rolling limit defaults to **100 requests per second** per process.\n- `GET /ping` is exempt.\n- Excess requests return **429 Too Many Requests** with `Retry-After: 1`.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 	LeftDelim:        "{{",

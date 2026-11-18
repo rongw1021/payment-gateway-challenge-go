@@ -1,0 +1,48 @@
+server:
+  address: ":8090"
+
+rate_limit:
+  requests_per_second: 100
+
+authentication:
+  api_keys:
+    - merchant_id: merchant-development1
+      # SHA-256 of the API key payload, excluding the "sk_" prefix. API key:"sk_development1"
+      key_hash: "1f9a3e11ec1b3ec8eff8d1d52bac7eef1af3c03a9f557bdc815b829752fedba3"
+      scopes:
+        - card-tokens:create
+        - payment-intents:create
+        - payment-intents:confirm
+        - payment-intents:read
+    - merchant_id: merchant-development2
+      # SHA-256 of the API key payload, excluding the "sk_" prefix. API key:"sk_development2"
+      key_hash: "054adc397fb5fe2079b54bef3a7f7b12a1afb3cb00cb91d4476de4d305b68a77"
+      scopes:
+        - card-tokens:create
+        - payment-intents:create
+        - payment-intents:confirm
+        - payment-intents:read
+    - merchant_id: merchant-development3
+      # SHA-256 of the API key payload, excluding the "sk_" prefix. API key:"sk_development3"
+      key_hash: "bad423dcdcc747bb2a19b9bd5b16d4ba2aba8d42b1d865d1beb54ba15a9cd229"
+      scopes:
+        - payment-intents:read
+
+bank_simulator:
+  base_address: "http://bank_simulator:8080/"
+  timeout: 5s
+
+observability:
+  enabled: false
+  service_name: payment-gateway
+  otlp:
+    endpoint: "http://otel_collector:4318"
+    timeout: 5s
+  metrics:
+    export_interval: 10s
+
+reconciliation:
+  sweep_interval: 5s
+  bank_transaction_status_update_timeout: 30s
+  batch_size: 100
+

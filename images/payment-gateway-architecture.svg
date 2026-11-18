@@ -1,0 +1,236 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1736" viewBox="0 0 1200 1736" role="img" aria-labelledby="title description">
+  <title id="title">Payment Gateway Service - Four-Layer Architecture</title>
+  <desc id="description">The client sits above the merchant backend, followed by an external load balancer and the Payment Gateway Service. Card tokenization bypasses the merchant backend but passes through the load balancer; payment-intent operations pass through both. The service has four explicit layers: middleware; controllers; application and background services; repositories and integrations. Application services and background services have distinct colors, as do repositories and integrations. Change Data Capture (CDC) uses an in-memory event queue. The timeout sweeper and reconciliation observer are separate components. Observability spans all four layers. The load balancer is a deployment component, not included in the local Compose stack, and does not imply support for multiple gateway instances. The bank simulator and optional telemetry stack are external dependencies.</desc>
+  <defs>
+    <style>
+      text { font-family: "Segoe UI", Arial, sans-serif; fill: #172b4d; }
+      .title { font-size: 30px; font-weight: 700; }
+      .subtitle { font-size: 17px; fill: #52657d; }
+      .section { font-size: 13px; font-weight: 700; letter-spacing: 1.1px; }
+      .layer-name { font-size: 14px; font-weight: 700; letter-spacing: 0.6px; }
+      .layer-number { font-size: 26px; font-weight: 700; fill: #64748b; }
+      .node-title { font-size: 17px; font-weight: 600; }
+      .node-detail { font-size: 13px; fill: #52657d; }
+      .label { font-size: 14px; font-weight: 500; }
+      .note { font-size: 13px; fill: #52657d; }
+      .dependency { fill: none; stroke: #66788f; stroke-width: 2; stroke-linejoin: round; }
+      .client-path { fill: none; stroke: #2563eb; stroke-width: 2.5; stroke-linejoin: round; }
+      .merchant-path { fill: none; stroke: #0f766e; stroke-width: 2.5; stroke-linejoin: round; }
+      .telemetry-path { fill: none; stroke: #7c3aed; stroke-width: 2.5; stroke-dasharray: 7 5; }
+    </style>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0 L9 4.5 L0 9 Z" fill="#66788f"/>
+    </marker>
+    <marker id="blue-arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="teal-arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#0f766e"/>
+    </marker>
+    <marker id="purple-arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#7c3aed"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="1736" fill="#ffffff"/>
+  <text x="48" y="52" class="title">Payment Gateway Service</text>
+  <text x="48" y="82" class="subtitle">Four-layer architecture and integration boundaries</text>
+  <text x="48" y="112" class="section" style="fill:#52657d">EXTERNAL ACTORS AND DEPLOYMENT INFRASTRUCTURE</text>
+
+  <path d="M800 208 V242 H885 V280" class="merchant-path" marker-end="url(#teal-arrow)"/>
+  <path d="M377 208 V456" class="client-path" marker-start="url(#blue-arrow)" marker-end="url(#blue-arrow)"/>
+  <path d="M885 368 V456" class="merchant-path" marker-end="url(#teal-arrow)"/>
+
+  <g class="node" id="client">
+    <rect x="340" y="128" width="520" height="80" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5"/>
+    <text x="600" y="159" text-anchor="middle" class="node-title">Client / checkout UI</text>
+    <text x="600" y="185" text-anchor="middle" class="node-detail">Browser or mobile application</text>
+  </g>
+  <g class="node" id="merchant-backend">
+    <rect x="650" y="280" width="470" height="88" rx="10" fill="#f0fdfa" stroke="#5eead4" stroke-width="1.5"/>
+    <text x="885" y="313" text-anchor="middle" class="node-title">Merchant backend</text>
+    <text x="885" y="341" text-anchor="middle" class="node-detail">Order logic / idempotency / server-side API keys</text>
+  </g>
+  <g class="node" id="load-balancer">
+    <rect x="280" y="456" width="824" height="72" rx="10" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="692" y="485" text-anchor="middle" class="node-title">Load balancer</text>
+    <text x="692" y="510" text-anchor="middle" class="node-detail">External deployment component</text>
+  </g>
+
+  <text x="904" y="239" class="label" style="fill:#0f766e">Card token +</text>
+  <text x="904" y="259" class="label" style="fill:#0f766e">checkout requests</text>
+  <rect x="247" y="308" width="260" height="48" rx="8" fill="#ffffff"/>
+  <text x="377" y="328" text-anchor="middle" class="label" style="fill:#1d4ed8">Direct tokenization</text>
+  <text x="377" y="348" text-anchor="middle" class="node-detail">PAN/CVV in; card token out</text>
+  <rect x="745" y="383" width="280" height="48" rx="8" fill="#ffffff"/>
+  <text x="885" y="403" text-anchor="middle" class="label" style="fill:#0f766e">Payment-intent operations</text>
+  <text x="885" y="423" text-anchor="middle" class="node-detail">Create / confirm / retrieve</text>
+
+  <g id="service-and-dependencies" transform="translate(0 128)">
+    <rect x="32" y="440" width="1136" height="884" rx="18" fill="#ffffff" stroke="#94a3b8" stroke-width="2"/>
+    <text x="600" y="478" text-anchor="middle" font-size="21" font-weight="700">Payment Gateway Service</text>
+
+    <g class="layer" id="middleware-layer">
+      <rect x="56" y="492" width="1088" height="126" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+      <text x="80" y="537" class="layer-number">1</text>
+      <text x="80" y="568" class="layer-name">MIDDLEWARE</text>
+    </g>
+    <g class="layer" id="controller-layer">
+      <rect x="56" y="646" width="1088" height="132" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+      <text x="80" y="691" class="layer-number">2</text>
+      <text x="80" y="722" class="layer-name">CONTROLLERS</text>
+    </g>
+    <g class="layer" id="services-layer">
+      <rect x="56" y="808" width="1088" height="174" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+      <text x="80" y="853" class="layer-number">3</text>
+      <text x="80" y="884" class="layer-name">APPLICATION &amp;</text>
+      <text x="80" y="905" class="layer-name">BACKGROUND</text>
+      <text x="80" y="926" class="layer-name">SERVICES</text>
+      <rect x="268" y="824" width="428" height="142" rx="10" fill="#f0fdf4" stroke="#86efac"/>
+      <text x="482" y="850" text-anchor="middle" class="section" style="fill:#166534">APPLICATION SERVICES</text>
+      <rect x="708" y="824" width="420" height="142" rx="10" fill="#fffbeb" stroke="#fcd34d"/>
+      <text x="918" y="850" text-anchor="middle" class="section" style="fill:#92400e">BACKGROUND SERVICES</text>
+    </g>
+    <g class="layer" id="repository-integration-layer">
+      <rect x="56" y="1032" width="1088" height="174" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+      <text x="80" y="1077" class="layer-number">4</text>
+      <text x="80" y="1108" class="layer-name">REPOSITORIES &amp;</text>
+      <text x="80" y="1129" class="layer-name">INTEGRATIONS</text>
+      <rect x="268" y="1048" width="642" height="142" rx="10" fill="#fff7ed" stroke="#fdba74"/>
+      <text x="482" y="1074" text-anchor="middle" class="section" style="fill:#9a3412">REPOSITORIES + CDC</text>
+      <rect x="924" y="1048" width="204" height="142" rx="10" fill="#ecfeff" stroke="#67e8f9"/>
+      <text x="1026" y="1074" text-anchor="middle" class="section" style="fill:#0e7490">INTEGRATIONS</text>
+    </g>
+
+    <rect x="268" y="1238" width="642" height="62" rx="10" fill="#f5f3ff" stroke="#ddd6fe"/>
+    <text x="284" y="1262" class="section" style="fill:#6d28d9">CROSS-CUTTING OBSERVABILITY</text>
+    <text x="284" y="1285" font-size="14">Logs / HTTP metrics / card-handler traces</text>
+    <rect x="730" y="1251" width="164" height="36" rx="8" fill="#ffffff" stroke="#ddd6fe"/>
+    <text x="812" y="1274" text-anchor="middle" class="node-detail">JSON console always on</text>
+
+    <rect x="32" y="1370" width="878" height="150" rx="16" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1.5"/>
+    <text x="470" y="1401" text-anchor="middle" class="section" style="fill:#6d28d9">OPTIONAL OBSERVABILITY STACK</text>
+    <rect x="924" y="1370" width="244" height="150" rx="16" fill="#ecfeff" stroke="#67e8f9" stroke-width="1.5"/>
+    <text x="944" y="1401" class="section" style="fill:#0e7490">EXTERNAL BANK</text>
+
+    <!-- Arrows show selected dependencies, not an execution sequence. -->
+    <path d="M377 400 V520" class="client-path" marker-start="url(#blue-arrow)" marker-end="url(#blue-arrow)"/>
+    <path d="M885 400 V520" class="merchant-path" marker-end="url(#teal-arrow)"/>
+    <path d="M377 590 V674" class="dependency" marker-end="url(#arrow)"/>
+    <path d="M587 590 V674" class="dependency" marker-end="url(#arrow)"/>
+    <path d="M377 750 V870" class="dependency" marker-end="url(#arrow)"/>
+    <path d="M587 750 V870" class="dependency" marker-end="url(#arrow)"/>
+    <path d="M490 908 H474" class="dependency" marker-end="url(#arrow)"/>
+    <path d="M377 946 V1094" class="dependency" marker-end="url(#arrow)"/>
+    <path d="M587 946 V1094" class="dependency" marker-end="url(#arrow)"/>
+    <path d="M815 946 V1006 H660 V1094" class="dependency" marker-end="url(#arrow)"/>
+    <path d="M1020 946 V1018 H803 V1094" class="dependency" marker-end="url(#arrow)"/>
+    <path d="M684 1132 H708" class="dependency" marker-end="url(#arrow)"/>
+    <path d="M684 908 H700 V994 H1152 V1132 H1118" fill="none" stroke="#ffffff" stroke-width="7" stroke-linejoin="round"/>
+    <path d="M684 908 H700 V994 H1152 V1132 H1118" class="dependency" marker-end="url(#arrow)"/>
+    <path d="M1108 1170 V1432" class="dependency" marker-end="url(#arrow)"/>
+    <path d="M300 1300 V1348 H176 V1432" class="telemetry-path" marker-end="url(#purple-arrow)"/>
+    <path d="M296 1465 H336" class="dependency" marker-end="url(#arrow)"/>
+    <path d="M620 1465 H580" class="dependency" marker-end="url(#arrow)"/>
+
+    <g class="node" id="middleware">
+      <rect x="280" y="520" width="824" height="70" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5"/>
+      <text x="692" y="548" text-anchor="middle" class="node-title">Request IDs / rate limiting / authentication + scopes</text>
+      <text x="692" y="573" text-anchor="middle" class="node-detail">Cache policy / idempotency headers / HTTP logs + metrics</text>
+    </g>
+    <g class="node" id="token-controller">
+      <rect x="280" y="674" width="194" height="76" rx="10" fill="#eef2ff" stroke="#a5b4fc" stroke-width="1.5"/>
+      <text x="377" y="696" text-anchor="middle" class="node-title">Card token</text>
+      <text x="377" y="719" text-anchor="middle" class="node-title">controller</text>
+      <text x="377" y="740" text-anchor="middle" class="node-detail">POST /api/CardTokens</text>
+    </g>
+    <g class="node" id="intent-controller">
+      <rect x="490" y="674" width="194" height="76" rx="10" fill="#eef2ff" stroke="#a5b4fc" stroke-width="1.5"/>
+      <text x="587" y="696" text-anchor="middle" class="node-title">Payment intent</text>
+      <text x="587" y="719" text-anchor="middle" class="node-title">controller</text>
+      <text x="587" y="740" text-anchor="middle" class="node-detail">Create / confirm / retrieve</text>
+    </g>
+    <text x="724" y="706" class="label">Model binding + input validation</text>
+    <text x="724" y="731" class="note">Service outcomes to HTTP responses</text>
+
+    <g class="node" id="card-service">
+      <rect x="280" y="870" width="194" height="76" rx="8" fill="#ffffff" stroke="#86efac" stroke-width="1.5"/>
+      <text x="377" y="899" text-anchor="middle" class="node-title">Card token service</text>
+      <text x="377" y="925" text-anchor="middle" class="node-detail">Issue / consume tokens</text>
+    </g>
+    <g class="node" id="payment-service">
+      <rect x="490" y="870" width="194" height="76" rx="8" fill="#ffffff" stroke="#86efac" stroke-width="1.5"/>
+      <text x="587" y="899" text-anchor="middle" class="node-title">Payment intent service</text>
+      <text x="587" y="925" text-anchor="middle" class="node-detail">Lifecycle / idempotency</text>
+    </g>
+    <g class="node" id="timeout-sweeper">
+      <rect x="720" y="870" width="190" height="76" rx="8" fill="#ffffff" stroke="#fcd34d" stroke-width="1.5"/>
+      <text x="815" y="896" text-anchor="middle" class="node-title">Timeout sweeper</text>
+      <text x="815" y="918" text-anchor="middle" class="node-detail">Mark stale attempts</text>
+      <text x="815" y="936" text-anchor="middle" class="node-detail">PendingVerification</text>
+    </g>
+    <g class="node" id="reconciliation">
+      <rect x="924" y="870" width="192" height="76" rx="8" fill="#ffffff" stroke="#fcd34d" stroke-width="1.5"/>
+      <text x="1020" y="896" text-anchor="middle" class="node-title">Reconciliation</text>
+      <text x="1020" y="918" text-anchor="middle" class="node-detail">Observe change events</text>
+      <text x="1020" y="936" text-anchor="middle" class="node-detail">Log unresolved outcomes</text>
+    </g>
+
+    <g class="node" id="token-repository">
+      <rect x="280" y="1094" width="194" height="76" rx="8" fill="#ffffff" stroke="#fdba74" stroke-width="1.5"/>
+      <text x="377" y="1120" text-anchor="middle" class="node-title">Token repository</text>
+      <text x="377" y="1142" text-anchor="middle" class="node-detail">Token hashes</text>
+      <text x="377" y="1160" text-anchor="middle" class="node-detail">Transient card data</text>
+    </g>
+    <g class="node" id="payment-repository">
+      <rect x="490" y="1094" width="194" height="76" rx="8" fill="#ffffff" stroke="#fdba74" stroke-width="1.5"/>
+      <text x="587" y="1120" text-anchor="middle" class="node-title">Payment repository</text>
+      <text x="587" y="1142" text-anchor="middle" class="node-detail">Payment intents</text>
+      <text x="587" y="1160" text-anchor="middle" class="node-detail">Bank transactions</text>
+    </g>
+    <g class="node" id="change-data-capture">
+      <rect x="708" y="1094" width="190" height="76" rx="8" fill="#ffffff" stroke="#fdba74" stroke-width="1.5"/>
+      <text x="803" y="1119" text-anchor="middle" class="node-title">Change Data Capture</text>
+      <text x="803" y="1142" text-anchor="middle" class="node-title">(CDC)</text>
+      <text x="803" y="1163" text-anchor="middle" class="node-detail">In-memory FIFO events</text>
+    </g>
+    <g class="node" id="bank-adapter">
+      <rect x="934" y="1094" width="184" height="76" rx="8" fill="#ffffff" stroke="#67e8f9" stroke-width="1.5"/>
+      <text x="1026" y="1123" text-anchor="middle" class="node-title">Bank HTTP adapter</text>
+      <text x="1026" y="1149" text-anchor="middle" class="node-detail">Bounded HTTP calls</text>
+    </g>
+
+    <g class="node" id="collector">
+      <rect x="56" y="1432" width="240" height="66" rx="10" fill="#ffffff" stroke="#c4b5fd" stroke-width="1.5"/>
+      <text x="176" y="1458" text-anchor="middle" class="node-title">OTel Collector</text>
+      <text x="176" y="1482" text-anchor="middle" class="node-detail">Receive / batch / export</text>
+    </g>
+    <g class="node" id="elasticsearch">
+      <rect x="336" y="1432" width="244" height="66" rx="10" fill="#ffffff" stroke="#c4b5fd" stroke-width="1.5"/>
+      <text x="458" y="1458" text-anchor="middle" class="node-title">Elasticsearch</text>
+      <text x="458" y="1482" text-anchor="middle" class="node-detail">Telemetry storage</text>
+    </g>
+    <g class="node" id="kibana">
+      <rect x="620" y="1432" width="266" height="66" rx="10" fill="#ffffff" stroke="#c4b5fd" stroke-width="1.5"/>
+      <text x="753" y="1458" text-anchor="middle" class="node-title">Kibana</text>
+      <text x="753" y="1482" text-anchor="middle" class="node-detail">Dashboard + data views</text>
+    </g>
+    <g class="node" id="bank-simulator">
+      <rect x="944" y="1432" width="200" height="66" rx="10" fill="#ffffff" stroke="#67e8f9" stroke-width="1.5"/>
+      <text x="1044" y="1458" text-anchor="middle" class="node-title">Bank simulator</text>
+      <text x="1044" y="1482" text-anchor="middle" class="node-detail">External authorization</text>
+    </g>
+
+    <text x="280" y="1227" class="note">State and idempotency records are process-local and lost on restart.</text>
+    <text x="1090" y="1276" text-anchor="end" class="label">Authorization (HTTP)</text>
+    <text x="194" y="1365" class="label" style="fill:#6d28d9">OTLP</text>
+    <text x="316" y="1452" text-anchor="middle" font-size="11" style="fill:#52657d">index</text>
+    <text x="600" y="1452" text-anchor="middle" font-size="11" style="fill:#52657d">query</text>
+
+    <path d="M48 1552 H82" class="dependency" marker-end="url(#arrow)"/>
+    <text x="94" y="1557" class="note">Calls / state and event dependencies</text>
+    <path d="M430 1552 H468" class="telemetry-path" marker-end="url(#purple-arrow)"/>
+    <text x="480" y="1557" class="note">Telemetry export</text>
+    <text x="48" y="1584" class="note">Selected dependencies shown. HTTP responses use the request path; client API key boundaries are described in the design document.</text>
+  </g>
+</svg>

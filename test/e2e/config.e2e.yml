@@ -1,0 +1,7 @@
+base_url: "http://localhost:8090"
+# Public fake credentials for development only; never use in production.
+api_key: "sk_development1"
+# A different merchant, with all four scopes.
+other_api_key: "sk_development2"
+# A different merchant from api_key, with only payment-intents:read.
+read_only_api_key: "sk_development3"

@@ -1,26 +1,947 @@
 basePath: /
 definitions:
-  main.Pong:
+  api.pong:
     properties:
       message:
+        example: pong
         type: string
+    required:
+    - message
     type: object
-host: localhost:8089
+  models.BankTransactionResponse:
+    properties:
+      bank_transaction_id:
+        format: uuid
+        type: string
+      card_number_last_four:
+        example: "0007"
+        maxLength: 4
+        minLength: 4
+        type: string
+      completed_at:
+        description: Null while Scheduled, including an in-flight bank request.
+        format: date-time
+        type: string
+        x-nullable: true
+      created_at:
+        format: date-time
+        type: string
+      expiry_month:
+        example: 4
+        maximum: 12
+        minimum: 1
+        type: integer
+      expiry_year:
+        example: 2099
+        maximum: 9999
+        minimum: 1
+        type: integer
+      status:
+        $ref: '#/definitions/models.BankTransactionStatus'
+    required:
+    - bank_transaction_id
+    - card_number_last_four
+    - completed_at
+    - created_at
+    - expiry_month
+    - expiry_year
+    - status
+    type: object
+  models.BankTransactionStatus:
+    enum:
+    - Scheduled
+    - Authorized
+    - Declined
+    - RequestTimeout
+    - StatusUpdateTimeout
+    - ServiceUnavailable
+    - NetworkError
+    - InvalidResponse
+    - RequestCanceled
+    type: string
+    x-enum-varnames:
+    - BankTransactionScheduled
+    - BankTransactionAuthorized
+    - BankTransactionDeclined
+    - BankTransactionRequestTimeout
+    - BankTransactionStatusUpdateTimeout
+    - BankTransactionServiceUnavailable
+    - BankTransactionNetworkError
+    - BankTransactionInvalidResponse
+    - BankTransactionRequestCanceled
+  models.CardTokenResponse:
+    properties:
+      expires_at:
+        format: date-time
+        type: string
+      request_id:
+        format: uuid
+        type: string
+      token:
+        description: Merchant-owned, single-use, canonical UUIDv7.
+        example: 01900000-0000-7000-8000-000000000001
+        format: uuid
+        type: string
+    required:
+    - expires_at
+    - request_id
+    - token
+    type: object
+  models.ConfirmPaymentIntentRequest:
+    properties:
+      card_token:
+        description: Use a token returned by /api/CardTokens, in lowercase hyphenated
+          UUID format.
+        example: 01900000-0000-7000-8000-000000000001
+        format: uuid
+        maxLength: 36
+        minLength: 36
+        type: string
+    required:
+    - card_token
+    type: object
+  models.CreateCardTokenRequest:
+    properties:
+      card_number:
+        description: Between 14 and 19 ASCII digits; the example is a synthetic simulator
+          card.
+        example: "0222405343240007"
+        maxLength: 19
+        minLength: 14
+        type: string
+      cvv:
+        description: Three or four ASCII digits.
+        example: "012"
+        maxLength: 4
+        minLength: 3
+        type: string
+      expiry_month:
+        description: The combined month/year must not be in the past; the current
+          month is accepted.
+        example: 4
+        maximum: 12
+        minimum: 1
+        type: integer
+      expiry_year:
+        example: 2099
+        maximum: 9999
+        minimum: 1
+        type: integer
+    required:
+    - card_number
+    - cvv
+    - expiry_month
+    - expiry_year
+    type: object
+  models.CreatePaymentIntentRequest:
+    properties:
+      amount:
+        description: Positive amount in the currency's minor unit.
+        example: 100
+        format: int32
+        maximum: 2147483647
+        minimum: 1
+        type: integer
+      currency:
+        enum:
+        - GBP
+        - USD
+        - EUR
+        example: GBP
+        type: string
+    required:
+    - amount
+    - currency
+    type: object
+  models.PaymentIntentResponse:
+    properties:
+      amount:
+        example: 100
+        format: int32
+        maximum: 2147483647
+        minimum: 1
+        type: integer
+      bank_transactions:
+        description: Complete history, oldest first; empty rather than null before
+          the first attempt.
+        items:
+          $ref: '#/definitions/models.BankTransactionResponse'
+        type: array
+      currency:
+        enum:
+        - GBP
+        - USD
+        - EUR
+        example: GBP
+        type: string
+      payment_intent_id:
+        format: uuid
+        type: string
+      request_id:
+        format: uuid
+        type: string
+      status:
+        $ref: '#/definitions/models.PaymentIntentStatus'
+    required:
+    - amount
+    - bank_transactions
+    - currency
+    - payment_intent_id
+    - request_id
+    - status
+    type: object
+  models.PaymentIntentStatus:
+    enum:
+    - Created
+    - Processing
+    - Authorized
+    - Declined
+    - PendingVerification
+    type: string
+    x-enum-varnames:
+    - PaymentIntentCreated
+    - PaymentIntentProcessing
+    - PaymentIntentAuthorized
+    - PaymentIntentDeclined
+    - PaymentIntentPendingVerification
+  models.ProblemDetails:
+    properties:
+      bank_transaction_id:
+        format: uuid
+        type: string
+      bank_transaction_status:
+        $ref: '#/definitions/models.BankTransactionStatus'
+      detail:
+        type: string
+      errors:
+        additionalProperties:
+          items:
+            type: string
+          type: array
+        type: object
+      payment_intent_id:
+        format: uuid
+        type: string
+      payment_intent_status:
+        $ref: '#/definitions/models.PaymentIntentStatus'
+      request_id:
+        format: uuid
+        type: string
+      status:
+        maximum: 599
+        minimum: 400
+        type: integer
+      title:
+        type: string
+    required:
+    - request_id
+    - status
+    - title
+    type: object
 info:
   contact: {}
-  description: Interview challenge for building a Payment Gateway - Go version
+  description: |-
+    Merchant-scoped card tokenization and payment intents with **idempotent confirmation** and bank transaction history.
+
+    ### Authentication
+    - Send `Authorization: Bearer sk_<payload>` on card-token and payment-intent requests.
+    - Use an **API key** with the required endpoint scope.
+
+    ### Requests and responses
+    - POST bodies must be single JSON objects no larger than **1 MiB**.
+    - Success responses use `application/json`; errors use `application/problem+json`.
+    - Payment endpoints return a fresh `X-Request-Id` and disable response caching.
+
+    ### Rate limiting
+    - A configurable global rolling limit defaults to **100 requests per second** per process.
+    - `GET /ping` is exempt.
+    - Excess requests return **429 Too Many Requests** with `Retry-After: 1`.
   title: Payment Gateway Challenge Go
+  version: dev
 paths:
+  /api/CardTokens:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        **Required scope:** `card-tokens:create`
+
+        ### Token lifecycle
+        - Tokens are lowercase, hyphenated `UUIDv7` strings.
+        - Each token belongs to the authenticated merchant and expires exactly **15 minutes** after issuance.
+        - Supply the single-use token when confirming a payment intent.
+
+        ### Card details
+        - Card numbers and CVVs must contain **ASCII digits**.
+        - The expiry month and year must not be in the past.
+      operationId: createCardToken
+      parameters:
+      - description: Card details
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.CreateCardTokenRequest'
+      produces:
+      - application/json
+      - application/problem+json
+      responses:
+        "200":
+          description: Single-use token and expiry timestamp
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.CardTokenResponse'
+        "400":
+          description: Malformed JSON or invalid/expired card details
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "401":
+          description: Unauthorized
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            WWW-Authenticate:
+              description: Bearer
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "403":
+          description: Forbidden
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "413":
+          description: Request body exceeds 1 MiB
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "415":
+          description: Content-Type must be application/json
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "429":
+          description: Global request limit exceeded
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            Retry-After:
+              description: 1 (wait one second before retrying)
+              type: integer
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "500":
+          description: Internal Server Error
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+      security:
+      - ApiKey: []
+      summary: Exchange card details for a single-use payment token.
+      tags:
+      - Cards
+  /api/PaymentIntents:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        **Required scope:** `payment-intents:create`
+
+        ### Creation
+        - Record the payment intent without contacting the bank.
+        - Return **201 Created** with the current intent, transaction history, and a `Location` lookup URL.
+
+        ### Idempotent replay
+        - The same merchant, idempotency key, currency, and amount return the current intent and history with **201 Created** and the same `Location`.
+        - A changed amount or currency under the same key returns **409 Conflict**.
+        - Creation and confirmation use **separate idempotency-key namespaces**.
+      operationId: createPaymentIntent
+      parameters:
+      - description: Lowercase hyphenated GUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+        format: uuid
+        in: header
+        maxLength: 36
+        minLength: 36
+        name: X-Idempotency-Key
+        required: true
+        type: string
+      - description: Intent details
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.CreatePaymentIntentRequest'
+      produces:
+      - application/json
+      - application/problem+json
+      responses:
+        "201":
+          description: Created intent, or current state on an idempotent replay
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Location:
+              description: Relative payment-intent lookup URL, also returned on replay
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.PaymentIntentResponse'
+        "400":
+          description: Invalid JSON, intent details, or idempotency key
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "401":
+          description: Unauthorized
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            WWW-Authenticate:
+              description: Bearer
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "403":
+          description: Forbidden
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "409":
+          description: Idempotency key reused with different intent details
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "413":
+          description: Request body exceeds 1 MiB
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "415":
+          description: Content-Type must be application/json
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "429":
+          description: Global request limit exceeded
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            Retry-After:
+              description: 1 (wait one second before retrying)
+              type: integer
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "500":
+          description: Internal Server Error
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+      security:
+      - ApiKey: []
+      summary: Create a payment intent without submitting a payment to the bank.
+      tags:
+      - Payment intents
+  /api/PaymentIntents/{paymentIntentId}:
+    get:
+      description: |-
+        **Required scope:** `payment-intents:read`
+
+        ### Response
+        - Return **200 OK** with the merchant-owned intent's current state and complete transaction history, **oldest first**.
+        - A new intent has an empty transaction history.
+        - Malformed, missing, or foreign intent IDs return **404 Not Found**.
+      operationId: getPaymentIntent
+      parameters:
+      - description: Payment intent UUID
+        format: uuid
+        in: path
+        name: paymentIntentId
+        required: true
+        type: string
+      produces:
+      - application/json
+      - application/problem+json
+      responses:
+        "200":
+          description: OK
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.PaymentIntentResponse'
+        "401":
+          description: Unauthorized
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            WWW-Authenticate:
+              description: Bearer
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "403":
+          description: Forbidden
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "404":
+          description: Intent ID is malformed, missing, or owned by another merchant
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "429":
+          description: Global request limit exceeded
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            Retry-After:
+              description: 1 (wait one second before retrying)
+              type: integer
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "500":
+          description: Internal Server Error
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+      security:
+      - ApiKey: []
+      summary: Retrieve the current state of a merchant-owned payment intent.
+      tags:
+      - Payment intents
+  /api/PaymentIntents/{paymentIntentId}/confirm:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        **Required scope:** `payment-intents:confirm`
+
+        ### New attempts
+        - Allowed only when the intent is `Created` or `Declined`.
+        - Consume a merchant-owned, single-use card token.
+
+        ### Idempotent replay
+        - Reuse the same idempotency key, intent, and card token, even after token expiry.
+        - Matching replays reuse the attempt and follow the **current intent state**, not a cached original response.
+
+        ### Response states
+        - **200 OK:** `Authorized` or `Declined`, with the complete transaction history.
+        - **202 Accepted:** `PendingVerification`, with complete history and a `Location` lookup URL.
+        - **409 Conflict:** The attempt is still `Processing`, the intent cannot start another attempt, or the idempotency key conflicts.
+
+        > **Pending verification:** A `202` response is not an authorization or a decline and does not guarantee eventual verification or success.
+        > **Do not retry with a new idempotency key.** Use the `Location` URL to retrieve the current intent.
+      operationId: confirmPaymentIntent
+      parameters:
+      - description: Payment intent UUID
+        format: uuid
+        in: path
+        name: paymentIntentId
+        required: true
+        type: string
+      - description: Lowercase hyphenated GUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+        format: uuid
+        in: header
+        maxLength: 36
+        minLength: 36
+        name: X-Idempotency-Key
+        required: true
+        type: string
+      - description: Single-use card token
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.ConfirmPaymentIntentRequest'
+      produces:
+      - application/json
+      - application/problem+json
+      responses:
+        "200":
+          description: Authorized or Declined intent with its complete transaction
+            history
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.PaymentIntentResponse'
+        "202":
+          description: Accepted confirmation with an unconfirmed bank outcome and
+            complete transaction history
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Location:
+              description: Relative payment-intent lookup URL, also returned on pending-verification
+                replay
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.PaymentIntentResponse'
+        "400":
+          description: Invalid request/key or invalid, expired, consumed, or foreign
+            card token
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "401":
+          description: Unauthorized
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            WWW-Authenticate:
+              description: Bearer
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "403":
+          description: Forbidden
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "404":
+          description: Intent ID is malformed, missing, or owned by another merchant
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "409":
+          description: Idempotency conflict, intent cannot be paid, or attempt is
+            still Processing
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "413":
+          description: Request body exceeds 1 MiB
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "415":
+          description: Content-Type must be application/json
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "429":
+          description: Global request limit exceeded
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            Retry-After:
+              description: 1 (wait one second before retrying)
+              type: integer
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "500":
+          description: Internal Server Error
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+      security:
+      - ApiKey: []
+      summary: Confirm a payment intent using a single-use card token.
+      tags:
+      - Payment intents
   /ping:
     get:
+      description: |-
+        - **Authentication:** Public endpoint; no API key is required.
+        - **Rate limit:** Exempt from the global rate limit.
+      operationId: ping
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/main.Pong'
+            $ref: '#/definitions/api.pong'
+      summary: Check gateway liveness.
+      tags:
+      - Health
 securityDefinitions:
-  BasicAuth:
-    type: basic
+  ApiKey:
+    description: Enter the full `Bearer sk_<payload>` value. This is an **API key**,
+      not JWT or HTTP Basic authentication.
+    in: header
+    name: Authorization
+    type: apiKey
 swagger: "2.0"

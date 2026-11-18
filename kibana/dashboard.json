@@ -1,0 +1,127 @@
+{
+  "id": "payment-gateway-dashboard",
+  "dashboard": {
+    "title": "Payment Gateway Dashboard",
+    "description": "HTTP metrics, structured logs, and card-token handler traces. HTTP success includes all non-5xx responses.",
+    "time_range": { "from": "now-15m", "to": "now" },
+    "refresh_interval": { "pause": false, "value": 10000 },
+    "query": { "language": "kql", "expression": "resource.attributes.service.name : \"payment-gateway\"" },
+    "panels": [
+      {
+        "id": "gateway-qps",
+        "type": "vis",
+        "grid": { "x": 0, "y": 0, "w": 16, "h": 12 },
+        "config": {
+          "title": "HTTP requests per second",
+          "description": "Sum of delta request counts normalized to seconds.",
+          "type": "xy",
+          "layers": [
+            {
+              "type": "line",
+              "data_source": { "type": "data_view_reference", "ref_id": "payment-gateway-metrics" },
+              "x": { "operation": "date_histogram", "field": "@timestamp", "suggested_interval": "1m" },
+              "y": [
+                {
+                  "operation": "sum",
+                  "field": "metrics.http.server.request.count",
+                  "time_scale": "s",
+                  "label": "Requests / second",
+                  "format": { "type": "number", "decimals": 2 }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "gateway-success-rate",
+        "type": "vis",
+        "grid": { "x": 16, "y": 0, "w": 16, "h": 12 },
+        "config": {
+          "title": "HTTP success rate",
+          "description": "Non-5xx requests divided by all requests. Empty windows have no measured success rate.",
+          "type": "xy",
+          "layers": [
+            {
+              "type": "line",
+              "data_source": { "type": "data_view_reference", "ref_id": "payment-gateway-metrics" },
+              "x": { "operation": "date_histogram", "field": "@timestamp", "suggested_interval": "1m" },
+              "y": [
+                {
+                  "operation": "formula",
+                  "formula": "sum(metrics.http.server.request.success.count) / sum(metrics.http.server.request.count)",
+                  "label": "Success rate",
+                  "format": { "type": "percent", "decimals": 1 }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "gateway-p95",
+        "type": "vis",
+        "grid": { "x": 32, "y": 0, "w": 16, "h": 12 },
+        "config": {
+          "title": "HTTP P95 latency",
+          "description": "Approximate 95th percentile from merged duration histograms, converted from seconds to milliseconds.",
+          "type": "xy",
+          "layers": [
+            {
+              "type": "line",
+              "data_source": { "type": "data_view_reference", "ref_id": "payment-gateway-metrics" },
+              "x": { "operation": "date_histogram", "field": "@timestamp", "suggested_interval": "1m" },
+              "y": [
+                {
+                  "operation": "formula",
+                  "formula": "percentile(metrics.http.server.request.duration, percentile=95) * 1000",
+                  "label": "P95 latency (ms)",
+                  "format": { "type": "number", "decimals": 2, "suffix": " ms" }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": "gateway-logs",
+        "type": "discover_session",
+        "grid": { "x": 0, "y": 12, "w": 48, "h": 15 },
+        "config": {
+          "title": "Gateway logs",
+          "tabs": [
+            {
+              "data_source": { "type": "data_view_reference", "ref_id": "payment-gateway-logs" },
+              "column_order": [
+                "@timestamp", "severity_number", "body.text", "attributes.request_id",
+                "attributes.route", "attributes.status_code", "attributes.latency_ms"
+              ],
+              "sort": [{ "name": "@timestamp", "direction": "desc" }],
+              "rows_per_page": 10
+            }
+          ]
+        }
+      },
+      {
+        "id": "gateway-traces",
+        "type": "discover_session",
+        "grid": { "x": 0, "y": 27, "w": 48, "h": 15 },
+        "config": {
+          "title": "Card-token traces",
+          "description": "Only the card-token handler is traced. Native span duration is in nanoseconds.",
+          "tabs": [
+            {
+              "data_source": { "type": "data_view_reference", "ref_id": "payment-gateway-traces" },
+              "column_order": [
+                "@timestamp", "name", "duration", "trace_id", "attributes.request_id",
+                "attributes.http.response.status_code"
+              ],
+              "sort": [{ "name": "@timestamp", "direction": "desc" }],
+              "rows_per_page": 10
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

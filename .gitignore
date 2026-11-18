@@ -83,3 +83,7 @@ terraform.rc
 .ionide
 
 # End of https://www.toptal.com/developers/gitignore/api/go,visualstudiocode,terraform
+
+# Keep environment-specific configuration out of version control.
+/config.*.yaml
+!/config.development.yaml

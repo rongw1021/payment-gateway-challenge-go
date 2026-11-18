@@ -1,0 +1,23 @@
+[
+  {
+    "id": "payment-gateway-logs",
+    "name": "Gateway logs",
+    "title": "logs-*.otel-*",
+    "timeFieldName": "@timestamp",
+    "allowNoIndex": true
+  },
+  {
+    "id": "payment-gateway-metrics",
+    "name": "Gateway metrics",
+    "title": "metrics-*.otel-*",
+    "timeFieldName": "@timestamp",
+    "allowNoIndex": true
+  },
+  {
+    "id": "payment-gateway-traces",
+    "name": "Gateway traces",
+    "title": "traces-*.otel-*",
+    "timeFieldName": "@timestamp",
+    "allowNoIndex": true
+  }
+]
