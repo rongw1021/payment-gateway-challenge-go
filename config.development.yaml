@@ -1,5 +1,14 @@
 server:
   address: ":8090"
+  # Omitted timeouts use these defaults; values must be at least 1ms.
+  read_header_timeout: 5s
+  # Total time for headers and body, not an inactivity timeout.
+  read_timeout: 10s
+  # Includes body reading and handler time; must exceed read_timeout + bank timeout.
+  # A write timeout does not cancel payment processing or prove a bank failure.
+  write_timeout: 30s
+  # Time to wait for the next request on a keep-alive connection.
+  idle_timeout: 60s
 
 rate_limit:
   requests_per_second: 100

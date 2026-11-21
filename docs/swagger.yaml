@@ -252,6 +252,11 @@ info:
     - Success responses use `application/json`; errors use `application/problem+json`.
     - Payment endpoints return a fresh `X-Request-Id` and disable response caching.
 
+    ### HTTP deadlines
+    - Configurable server defaults: **5s** for headers, **15s** for headers and body, **30s** for response writes, and **60s** for idle keep-alive connections.
+    - Slow POST body uploads return **408 Request Timeout** before payment processing. Incomplete headers or stalled response readers may result in a closed connection without a JSON response.
+    - The write deadline includes body reading and handler time. It must exceed the request-read budget plus the bank timeout; it does not cancel bank processing or prove that a payment failed.
+
     ### Rate limiting
     - A configurable global rolling limit defaults to **100 requests per second** per process.
     - `GET /ping` is exempt.
@@ -333,6 +338,20 @@ paths:
             $ref: '#/definitions/models.ProblemDetails'
         "403":
           description: Forbidden
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "408":
+          description: Request body was not received before the read deadline
           headers:
             Cache-Control:
               description: no-store
@@ -494,6 +513,20 @@ paths:
             $ref: '#/definitions/models.ProblemDetails'
         "403":
           description: Forbidden
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "408":
+          description: Request body was not received before the read deadline
           headers:
             Cache-Control:
               description: no-store
@@ -830,6 +863,20 @@ paths:
             $ref: '#/definitions/models.ProblemDetails'
         "404":
           description: Intent ID is malformed, missing, or owned by another merchant
+          headers:
+            Cache-Control:
+              description: no-store
+              type: string
+            Pragma:
+              description: no-cache
+              type: string
+            X-Request-Id:
+              description: Server-generated request UUIDv7 when available
+              type: string
+          schema:
+            $ref: '#/definitions/models.ProblemDetails'
+        "408":
+          description: Request body was not received before the read deadline
           headers:
             Cache-Control:
               description: no-store

@@ -18,6 +18,7 @@ import (
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/api"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/backgroundservices"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/changedatacapture"
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/config"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/integrations/banksimulator"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/middleware"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/test/scenarios"
@@ -100,7 +101,7 @@ func TestIntegrationScenarios(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- gateway.Serve(ctx, listener) }()
+	go func() { done <- gateway.Serve(ctx, listener, config.DefaultServerConfig()) }()
 	t.Cleanup(func() {
 		cancel()
 		select {

@@ -40,6 +40,11 @@ var (
 // @description				- Success responses use `application/json`; errors use `application/problem+json`.
 // @description				- Payment endpoints return a fresh `X-Request-Id` and disable response caching.
 // @description
+// @description				### HTTP deadlines
+// @description				- Configurable server defaults: **5s** for headers, **15s** for headers and body, **30s** for response writes, and **60s** for idle keep-alive connections.
+// @description				- Slow POST body uploads return **408 Request Timeout** before payment processing. Incomplete headers or stalled response readers may result in a closed connection without a JSON response.
+// @description				- The write deadline includes body reading and handler time. It must exceed the request-read budget plus the bank timeout; it does not cancel bank processing or prove that a payment failed.
+// @description
 // @description				### Rate limiting
 // @description				- A configurable global rolling limit defaults to **100 requests per second** per process.
 // @description				- `GET /ping` is exempt.
@@ -112,7 +117,7 @@ func run() error {
 		}
 	}()
 
-	if err := api.Run(ctx, cfg.Server.Address); err != nil {
+	if err := api.Run(ctx, cfg.Server); err != nil {
 		return err
 	}
 

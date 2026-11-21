@@ -73,6 +73,10 @@ func TestSwaggerDocumentsCurrentHTTPContract(t *testing.T) {
 		assert.Contains(t, operation.Responses["429"].Headers, "Retry-After")
 		require.Contains(t, operation.Responses, "401")
 		assert.Contains(t, operation.Responses["401"].Headers, "WWW-Authenticate")
+		if endpoint.method == "post" {
+			require.Contains(t, operation.Responses, "408")
+			assert.Equal(t, "#/definitions/models.ProblemDetails", operation.Responses["408"].Schema.Ref)
+		}
 		for status, response := range operation.Responses {
 			for _, header := range []string{"X-Request-Id", "Cache-Control", "Pragma"} {
 				assert.Contains(t, response.Headers, header, "%s %s response %s", endpoint.method, endpoint.path, status)

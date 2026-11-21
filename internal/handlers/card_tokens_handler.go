@@ -54,6 +54,7 @@ func NewCardTokensHandler(service CardTokenIssuer) *CardTokensHandler {
 //	@Success		200			{object}	models.CardTokenResponse		"Single-use token and expiry timestamp"
 //	@Failure		400			{object}	models.ProblemDetails			"Malformed JSON or invalid/expired card details"
 //	@Failure		401,403,500	{object}	models.ProblemDetails
+//	@Failure		408			{object}	models.ProblemDetails	"Request body was not received before the read deadline"
 //	@Failure		413			{object}	models.ProblemDetails	"Request body exceeds 1 MiB"
 //	@Failure		415			{object}	models.ProblemDetails	"Content-Type must be application/json"
 //	@Failure		429			{object}	models.ProblemDetails	"Global request limit exceeded"

@@ -1,23 +1,28 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/backgroundservices"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/changedatacapture"
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/config"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/integrations/banksimulator"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/logging"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/middleware"
@@ -63,6 +68,264 @@ func testCronOptions() backgroundservices.CronJobOptions {
 	return backgroundservices.CronJobOptions{
 		SweepInterval: time.Hour, BankTransactionStatusUpdateTimeout: 30 * time.Second, BatchSize: 100,
 	}
+}
+
+func newDeadlineTestAPI(t *testing.T, bank testBank) (*Api, *atomic.Int32) {
+	t.Helper()
+	var bankCalls atomic.Int32
+	if bank == nil {
+		bank = func(context.Context, banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
+			code := "bank-code"
+			return banksimulator.BankAuthorizationResponse{Authorized: true, AuthorizationCode: &code}, nil
+		}
+	}
+	hash := sha256.Sum256([]byte("deadlines"))
+	gateway, err := New([]middleware.APIKeyCredential{{
+		MerchantID: "merchant", KeyHash: hex.EncodeToString(hash[:]),
+		Scopes: []string{middleware.CardTokensCreate, middleware.PaymentIntentsCreate, middleware.PaymentIntentsConfirm},
+	}}, testBank(func(ctx context.Context, request banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
+		bankCalls.Add(1)
+		return bank(ctx, request)
+	}), changedatacapture.NewInMemory(), testCronOptions(), 100)
+	require.NoError(t, err)
+	return gateway, &bankCalls
+}
+
+func serveDeadlineTestAPI(t *testing.T, gateway *Api, listener net.Listener, options config.ServerConfig) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- gateway.Serve(ctx, listener, options) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			assert.NoError(t, err)
+		case <-time.After(6 * time.Second):
+			t.Error("deadline-test server did not shut down")
+		}
+	})
+}
+
+func TestHTTPReadAndIdleDeadlines(t *testing.T) {
+	for _, stage := range []string{"headers", "card body", "intent body", "confirmation body", "idle"} {
+		t.Run(stage, func(t *testing.T) {
+			gateway, bankCalls := newDeadlineTestAPI(t, nil)
+			options := config.ServerConfig{
+				ReadHeaderTimeout: 250 * time.Millisecond, ReadTimeout: 1200 * time.Millisecond,
+				WriteTimeout: 3 * time.Second, IdleTimeout: 250 * time.Millisecond,
+			}
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			serveDeadlineTestAPI(t, gateway, listener, options)
+			conn, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+			require.NoError(t, err)
+			t.Cleanup(func() { conn.Close() })
+			require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+			reader := bufio.NewReader(conn)
+
+			if stage == "headers" || stage == "idle" {
+				request := "GET /ping HTTP/1.1\r\nHost: localhost\r\n"
+				if stage == "idle" {
+					request += "\r\n"
+				}
+				_, err = io.WriteString(conn, request)
+				require.NoError(t, err)
+				if stage == "idle" {
+					response, err := http.ReadResponse(reader, nil)
+					require.NoError(t, err)
+					assert.Equal(t, http.StatusOK, response.StatusCode)
+					_, err = io.Copy(io.Discard, response.Body)
+					require.NoError(t, err)
+					require.NoError(t, response.Body.Close())
+					assert.False(t, response.Close, "healthy connection must be reusable before its idle deadline")
+				}
+				started := time.Now()
+				_, err = reader.ReadByte()
+				require.ErrorIs(t, err, io.EOF, "server must close the connection, not wait for the client's five-second deadline")
+				assert.Less(t, time.Since(started), 800*time.Millisecond, "header/idle deadline must apply before the longer read deadline")
+				assert.Zero(t, bankCalls.Load())
+				return
+			}
+
+			path, body, expected := "/api/CardTokens",
+				`{"card_number":"0222405343240007","expiry_month":4,"expiry_year":9999,"cvv":"012"}`, http.StatusOK
+			var intentID string
+			if stage == "intent body" {
+				path, body, expected = "/api/PaymentIntents", `{"currency":"GBP","amount":100}`, http.StatusCreated
+			} else if stage == "confirmation body" {
+				amount := int32(100)
+				intent, _, err := gateway.paymentIntents.CreatePaymentIntent(context.Background(), "merchant", "create",
+					models.CreatePaymentIntentRequest{Currency: "GBP", Amount: &amount})
+				require.NoError(t, err)
+				token, err := gateway.cardTokens.Issue(context.Background(), "merchant",
+					models.CreateCardTokenRequest{CardNumber: "0222405343240007", ExpiryMonth: 4, ExpiryYear: 9999, Cvv: "012"})
+				require.NoError(t, err)
+				intentID = intent.PaymentIntentID
+				path = "/api/PaymentIntents/" + intentID + "/confirm"
+				body = fmt.Sprintf(`{"card_token":%q}`, token.Token)
+			}
+			const key = "01234567-89ab-4cde-8123-456789abcdef"
+			headers := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer sk_deadlines\r\nContent-Type: application/json\r\nX-Idempotency-Key: %s\r\nContent-Length: %d\r\n\r\n", path, key, len(body))
+			_, err = io.WriteString(conn, headers+body[:len(body)-1])
+			require.NoError(t, err)
+			started := time.Now()
+			response, err := http.ReadResponse(reader, nil)
+			require.NoError(t, err, "a slow body should receive an HTTP timeout response")
+			elapsed := time.Since(started)
+			assert.GreaterOrEqual(t, elapsed, options.ReadTimeout/2, "body reading must not be limited to the shorter header deadline")
+			assert.Less(t, elapsed, 2500*time.Millisecond)
+			assert.Equal(t, http.StatusRequestTimeout, response.StatusCode)
+			assert.Equal(t, "application/problem+json", response.Header.Get("Content-Type"))
+			assert.Equal(t, "no-store", response.Header.Get("Cache-Control"))
+			var problem models.ProblemDetails
+			require.NoError(t, json.NewDecoder(response.Body).Decode(&problem))
+			require.NoError(t, response.Body.Close())
+			assert.Equal(t, http.StatusRequestTimeout, problem.Status)
+			assert.NotEmpty(t, problem.RequestID)
+			assert.Equal(t, response.Header.Get("X-Request-Id"), problem.RequestID)
+			assert.Zero(t, bankCalls.Load())
+			if intentID != "" {
+				intent, err := gateway.paymentIntents.GetPaymentIntent("merchant", intentID)
+				require.NoError(t, err)
+				assert.Equal(t, models.PaymentIntentCreated, intent.Status)
+				assert.Empty(t, intent.BankTransactions)
+			}
+			require.NoError(t, conn.Close())
+
+			// A timed-out body must not consume the token or reserve the idempotency key.
+			request, err := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+path, strings.NewReader(body))
+			require.NoError(t, err)
+			request.Header.Set("Authorization", "Bearer sk_deadlines")
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-Idempotency-Key", key)
+			client := &http.Client{Timeout: 5 * time.Second}
+			t.Cleanup(client.CloseIdleConnections)
+			retry, err := client.Do(request)
+			require.NoError(t, err)
+			defer retry.Body.Close()
+			assert.Equal(t, expected, retry.StatusCode)
+			if intentID != "" {
+				var intent models.PaymentIntentResponse
+				require.NoError(t, json.NewDecoder(retry.Body).Decode(&intent))
+				assert.Equal(t, models.PaymentIntentAuthorized, intent.Status)
+				assert.Len(t, intent.BankTransactions, 1)
+				assert.EqualValues(t, 1, bankCalls.Load())
+			}
+		})
+	}
+}
+
+type deadlineTestConn struct {
+	net.Conn
+	writeErrors chan error
+}
+
+func (conn *deadlineTestConn) Write(body []byte) (int, error) {
+	n, err := conn.Conn.Write(body)
+	if err != nil {
+		select {
+		case conn.writeErrors <- err:
+		default:
+		}
+	}
+	return n, err
+}
+
+type deadlineTestListener struct {
+	conn   net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (listener *deadlineTestListener) Accept() (net.Conn, error) {
+	if listener.conn != nil {
+		conn := listener.conn
+		listener.conn = nil
+		return conn, nil
+	}
+	<-listener.closed
+	return nil, net.ErrClosed
+}
+
+func (listener *deadlineTestListener) Close() error {
+	listener.once.Do(func() { close(listener.closed) })
+	return nil
+}
+
+func (*deadlineTestListener) Addr() net.Addr { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)} }
+
+func TestHTTPWriteDeadlineForStalledReader(t *testing.T) {
+	gateway, bankCalls := newDeadlineTestAPI(t, nil)
+	server, client := net.Pipe()
+	writeErrors := make(chan error, 1)
+	listener := &deadlineTestListener{
+		conn: &deadlineTestConn{Conn: server, writeErrors: writeErrors}, closed: make(chan struct{}),
+	}
+	options := config.ServerConfig{
+		ReadHeaderTimeout: 100 * time.Millisecond, ReadTimeout: 200 * time.Millisecond,
+		WriteTimeout: 500 * time.Millisecond, IdleTimeout: time.Second,
+	}
+	serveDeadlineTestAPI(t, gateway, listener, options)
+	t.Cleanup(func() { client.Close(); server.Close() })
+	require.NoError(t, client.SetWriteDeadline(time.Now().Add(5*time.Second)))
+	_, err := io.WriteString(client, "GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	require.NoError(t, err)
+	// net.Pipe has no write buffer, so a client that never reads reliably blocks the response.
+	select {
+	case err := <-writeErrors:
+		var timeout net.Error
+		require.ErrorAs(t, err, &timeout)
+		assert.True(t, timeout.Timeout())
+	case <-time.After(2 * time.Second):
+		t.Fatal("response write was not bounded by the server deadline")
+	}
+	assert.Zero(t, bankCalls.Load())
+}
+
+func TestHTTPReadDeadlineDoesNotCancelBankCall(t *testing.T) {
+	options := config.ServerConfig{
+		ReadHeaderTimeout: 250 * time.Millisecond, ReadTimeout: 500 * time.Millisecond,
+		WriteTimeout: 3 * time.Second, IdleTimeout: time.Second,
+	}
+	gateway, bankCalls := newDeadlineTestAPI(t, testBank(func(ctx context.Context, _ banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
+		timer := time.NewTimer(2 * options.ReadTimeout)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			code := "bank-code"
+			return banksimulator.BankAuthorizationResponse{Authorized: true, AuthorizationCode: &code}, nil
+		case <-ctx.Done():
+			return banksimulator.BankAuthorizationResponse{}, ctx.Err()
+		}
+	}))
+	amount := int32(100)
+	intent, _, err := gateway.paymentIntents.CreatePaymentIntent(context.Background(), "merchant", "create",
+		models.CreatePaymentIntentRequest{Currency: "GBP", Amount: &amount})
+	require.NoError(t, err)
+	token, err := gateway.cardTokens.Issue(context.Background(), "merchant",
+		models.CreateCardTokenRequest{CardNumber: "0222405343240007", ExpiryMonth: 4, ExpiryYear: 9999, Cvv: "012"})
+	require.NoError(t, err)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	serveDeadlineTestAPI(t, gateway, listener, options)
+	request, err := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+"/api/PaymentIntents/"+intent.PaymentIntentID+"/confirm",
+		strings.NewReader(fmt.Sprintf(`{"card_token":%q}`, token.Token)))
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer sk_deadlines")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Idempotency-Key", "01234567-89ab-4cde-8123-456789abcdef")
+	client := &http.Client{Timeout: 5 * time.Second}
+	t.Cleanup(client.CloseIdleConnections)
+	response, err := client.Do(request)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	var confirmed models.PaymentIntentResponse
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&confirmed))
+	assert.Equal(t, models.PaymentIntentAuthorized, confirmed.Status)
+	require.Len(t, confirmed.BankTransactions, 1)
+	assert.EqualValues(t, 1, bankCalls.Load())
 }
 
 func TestAPIRequestLoggingIncludesAuthenticationAndBindingFailures(t *testing.T) {
@@ -217,7 +480,7 @@ func TestAPIBackgroundServicesRunAndStopWithServer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
 	go func() {
-		serverDone <- api.Serve(ctx, listener)
+		serverDone <- api.Serve(ctx, listener, config.DefaultServerConfig())
 		close(serverDone)
 	}()
 	t.Cleanup(func() {
@@ -311,7 +574,7 @@ func TestAPIStopsWhenBackgroundConsumerFails(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	assert.ErrorIs(t, api.Serve(ctx, listener), failure)
+	assert.ErrorIs(t, api.Serve(ctx, listener, config.DefaultServerConfig()), failure)
 }
 
 func TestAPIRejectsInvalidCronConfiguration(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/httpresponse"
@@ -34,8 +35,11 @@ func BindJSON[T any](w http.ResponseWriter, r *http.Request) (*T, bool) {
 	}
 	if err != nil || request == nil {
 		var tooLarge *http.MaxBytesError
+		var timeout net.Error
 		if errors.As(err, &tooLarge) {
 			httpresponse.WriteProblem(w, http.StatusRequestEntityTooLarge, requestID, nil)
+		} else if errors.As(err, &timeout) && timeout.Timeout() {
+			httpresponse.WriteProblem(w, http.StatusRequestTimeout, requestID, nil)
 		} else {
 			httpresponse.WriteProblem(w, http.StatusBadRequest, requestID, map[string][]string{
 				"body": {"A single JSON object is required."},

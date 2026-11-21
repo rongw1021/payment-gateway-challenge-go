@@ -131,6 +131,26 @@ const docTemplate = `{
                             }
                         }
                     },
+                    "408": {
+                        "description": "Request body was not received before the read deadline",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
                     "413": {
                         "description": "Request body exceeds 1 MiB",
                         "schema": {
@@ -330,6 +350,26 @@ const docTemplate = `{
                     },
                     "403": {
                         "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "408": {
+                        "description": "Request body was not received before the read deadline",
                         "schema": {
                             "$ref": "#/definitions/models.ProblemDetails"
                         },
@@ -774,6 +814,26 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "Intent ID is malformed, missing, or owned by another merchant",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProblemDetails"
+                        },
+                        "headers": {
+                            "Cache-Control": {
+                                "type": "string",
+                                "description": "no-store"
+                            },
+                            "Pragma": {
+                                "type": "string",
+                                "description": "no-cache"
+                            },
+                            "X-Request-Id": {
+                                "type": "string",
+                                "description": "Server-generated request UUIDv7 when available"
+                            }
+                        }
+                    },
+                    "408": {
+                        "description": "Request body was not received before the read deadline",
                         "schema": {
                             "$ref": "#/definitions/models.ProblemDetails"
                         },
@@ -1242,7 +1302,7 @@ var SwaggerInfo = &swag.Spec{
 	BasePath:         "/",
 	Schemes:          []string{},
 	Title:            "Payment Gateway Challenge Go",
-	Description:      "Merchant-scoped card tokenization and payment intents with **idempotent confirmation** and bank transaction history.\n\n### Authentication\n- Send `Authorization: Bearer sk_<payload>` on card-token and payment-intent requests.\n- Use an **API key** with the required endpoint scope.\n\n### Requests and responses\n- POST bodies must be single JSON objects no larger than **1 MiB**.\n- Success responses use `application/json`; errors use `application/problem+json`.\n- Payment endpoints return a fresh `X-Request-Id` and disable response caching.\n\n### Rate limiting\n- A configurable global rolling limit defaults to **100 requests per second** per process.\n- `GET /ping` is exempt.\n- Excess requests return **429 Too Many Requests** with `Retry-After: 1`.",
+	Description:      "Merchant-scoped card tokenization and payment intents with **idempotent confirmation** and bank transaction history.\n\n### Authentication\n- Send `Authorization: Bearer sk_<payload>` on card-token and payment-intent requests.\n- Use an **API key** with the required endpoint scope.\n\n### Requests and responses\n- POST bodies must be single JSON objects no larger than **1 MiB**.\n- Success responses use `application/json`; errors use `application/problem+json`.\n- Payment endpoints return a fresh `X-Request-Id` and disable response caching.\n\n### HTTP deadlines\n- Configurable server defaults: **5s** for headers, **15s** for headers and body, **30s** for response writes, and **60s** for idle keep-alive connections.\n- Slow POST body uploads return **408 Request Timeout** before payment processing. Incomplete headers or stalled response readers may result in a closed connection without a JSON response.\n- The write deadline includes body reading and handler time. It must exceed the request-read budget plus the bank timeout; it does not cancel bank processing or prove that a payment failed.\n\n### Rate limiting\n- A configurable global rolling limit defaults to **100 requests per second** per process.\n- `GET /ping` is exempt.\n- Excess requests return **429 Too Many Requests** with `Retry-After: 1`.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 	LeftDelim:        "{{",

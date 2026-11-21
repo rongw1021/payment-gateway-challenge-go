@@ -52,6 +52,7 @@ func NewPaymentIntentsHandler(service PaymentIntentService) *PaymentIntentsHandl
 //	@Success		201					{object}	models.PaymentIntentResponse		"Created intent, or current state on an idempotent replay"
 //	@Failure		400					{object}	models.ProblemDetails				"Invalid JSON, intent details, or idempotency key"
 //	@Failure		401,403,500			{object}	models.ProblemDetails
+//	@Failure		408					{object}	models.ProblemDetails	"Request body was not received before the read deadline"
 //	@Failure		409					{object}	models.ProblemDetails	"Idempotency key reused with different intent details"
 //	@Failure		413					{object}	models.ProblemDetails	"Request body exceeds 1 MiB"
 //	@Failure		415					{object}	models.ProblemDetails	"Content-Type must be application/json"
@@ -122,6 +123,7 @@ func (h *PaymentIntentsHandler) PostHandler() http.HandlerFunc {
 //	@Success		202					{object}	models.PaymentIntentResponse		"Accepted confirmation with an unconfirmed bank outcome and complete transaction history"
 //	@Failure		400					{object}	models.ProblemDetails				"Invalid request/key or invalid, expired, consumed, or foreign card token"
 //	@Failure		401,403,500			{object}	models.ProblemDetails
+//	@Failure		408					{object}	models.ProblemDetails	"Request body was not received before the read deadline"
 //	@Failure		404					{object}	models.ProblemDetails	"Intent ID is malformed, missing, or owned by another merchant"
 //	@Failure		409					{object}	models.ProblemDetails	"Idempotency conflict, intent cannot be paid, or attempt is still Processing"
 //	@Failure		413					{object}	models.ProblemDetails	"Request body exceeds 1 MiB"

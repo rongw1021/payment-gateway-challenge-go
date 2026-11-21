@@ -106,6 +106,70 @@ func TestLoadDefaultsMissingRateLimitForExistingProfiles(t *testing.T) {
 	assert.EqualValues(t, 100, cfg.RateLimit.RequestsPerSecond)
 }
 
+func TestLoadServerTimeoutDefaultsAndOverrides(t *testing.T) {
+	directory := configDirectory(t)
+	t.Setenv("ENVIRONMENT", "test")
+	for _, test := range []struct {
+		name, settings string
+		expected       ServerConfig
+	}{
+		{"omitted", "", ServerConfig{
+			Address: ":8090", ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
+			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
+		}},
+		{"partial", "  idle_timeout: 2m\n", ServerConfig{
+			Address: ":8090", ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
+			WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute,
+		}},
+		{"all", "  read_header_timeout: 250ms\n  read_timeout: 2s\n  write_timeout: 8s\n  idle_timeout: 10s\n", ServerConfig{
+			Address: ":8090", ReadHeaderTimeout: 250 * time.Millisecond, ReadTimeout: 2 * time.Second,
+			WriteTimeout: 8 * time.Second, IdleTimeout: 10 * time.Second,
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			content := strings.Replace(validConfig(":8090"), "authentication:", test.settings+"authentication:", 1)
+			require.NoError(t, os.WriteFile(filepath.Join(directory, "config.test.yaml"), []byte(content), 0600))
+			cfg, err := Load()
+			require.NoError(t, err)
+			assert.Equal(t, test.expected, cfg.Server)
+		})
+	}
+}
+
+func TestLoadRejectsInvalidServerTimeouts(t *testing.T) {
+	directory := configDirectory(t)
+	t.Setenv("ENVIRONMENT", "test")
+	for _, field := range []string{"read_header_timeout", "read_timeout", "write_timeout", "idle_timeout"} {
+		for _, value := range []string{"0s", "-1s", "1ns", "2147483648ms", "5", "someday"} {
+			t.Run(field+"/"+value, func(t *testing.T) {
+				setting := fmt.Sprintf("  %s: %s\n", field, value)
+				content := strings.Replace(validConfig(":8090"), "authentication:", setting+"authentication:", 1)
+				require.NoError(t, os.WriteFile(filepath.Join(directory, "config.test.yaml"), []byte(content), 0600))
+				cfg, err := Load()
+				require.Error(t, err)
+				assert.Nil(t, cfg)
+			})
+		}
+	}
+	for _, test := range []struct {
+		name, settings, bankTimeout, errorField string
+	}{
+		{"headers exceed read budget", "  read_header_timeout: 16s\n", "5s", "server.read_timeout"},
+		{"write equals read budget", "  write_timeout: 15s\n", "5s", "server.write_timeout"},
+		{"write equals read and bank budget", "  write_timeout: 20s\n", "5s", "bank_simulator.timeout"},
+		{"bank exceeds write budget", "", "1m", "bank_simulator.timeout"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			content := strings.Replace(validConfig(":8090"), "authentication:", test.settings+"authentication:", 1)
+			content = strings.Replace(content, "timeout: 5s", "timeout: "+test.bankTimeout, 1)
+			require.NoError(t, os.WriteFile(filepath.Join(directory, "config.test.yaml"), []byte(content), 0600))
+			cfg, err := Load()
+			require.ErrorContains(t, err, test.errorField)
+			assert.Nil(t, cfg)
+		})
+	}
+}
+
 func TestLoadRejectsInvalidEnvironmentAndMissingSelectedFile(t *testing.T) {
 	directory := configDirectory(t)
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "config.development.yaml"), []byte(validConfig(":8090")), 0600))

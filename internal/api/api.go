@@ -11,6 +11,7 @@ import (
 
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/backgroundservices"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/changedatacapture"
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/config"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/integrations/banksimulator"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/middleware"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/repository"
@@ -61,20 +62,27 @@ func New(credentials []middleware.APIKeyCredential, bank banksimulator.Client, c
 	return a, nil
 }
 
-func (a *Api) Run(ctx context.Context, addr string) error {
-	listener, err := net.Listen("tcp", addr)
+func (a *Api) Run(ctx context.Context, options config.ServerConfig) error {
+	listener, err := net.Listen("tcp", options.Address)
 	if err != nil {
 		return fmt.Errorf("listen for HTTP requests: %w", err)
 	}
-	return a.Serve(ctx, listener)
+	return a.Serve(ctx, listener, options)
 }
 
 // Serve runs HTTP and background workers on listener, closing it when serving stops.
-func (a *Api) Serve(ctx context.Context, listener net.Listener) error {
+func (a *Api) Serve(ctx context.Context, listener net.Listener, options config.ServerConfig) error {
+	if err := options.Validate(); err != nil {
+		return errors.Join(fmt.Errorf("configure HTTP server: %w", err), listener.Close())
+	}
 	g, ctx := errgroup.WithContext(ctx)
 	httpServer := &http.Server{
-		Handler:     a.router,
-		BaseContext: func(_ net.Listener) context.Context { return ctx },
+		Handler:           a.router,
+		BaseContext:       func(_ net.Listener) context.Context { return ctx },
+		ReadHeaderTimeout: options.ReadHeaderTimeout,
+		ReadTimeout:       options.ReadTimeout,
+		WriteTimeout:      options.WriteTimeout,
+		IdleTimeout:       options.IdleTimeout,
 	}
 
 	g.Go(func() error {
