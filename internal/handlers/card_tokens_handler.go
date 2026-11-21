@@ -65,15 +65,33 @@ func NewCardTokensHandler(service CardTokenIssuer) *CardTokensHandler {
 //	@Header			429			{integer}	Retry-After				"1 (wait one second before retrying)"
 //	@Router			/api/CardTokens [post]
 func (h *CardTokensHandler) PostHandler() http.HandlerFunc {
+	return h.traceCardToken(func(w http.ResponseWriter, r *http.Request) {
+		merchantID := middleware.MerchantIDFromContext(r.Context())
+		request, ok := modelbinding.BindJSON[models.CreateCardTokenRequest](w, r)
+		if !ok {
+			return
+		}
+		response, err := h.service.Issue(r.Context(), merchantID, *request)
+		if err != nil {
+			writeCardTokenError(r.Context(), w, err)
+			return
+		}
+		if response == nil {
+			writeCardTokenError(r.Context(), w, errors.New("issuance returned no card token"))
+			return
+		}
+		writeCardTokenResponse(r.Context(), w, response)
+	})
+}
+
+func (h *CardTokensHandler) traceCardToken(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := middleware.GetRequestID(r.Context())
 		parent := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 		ctx, span := h.tracer.Start(parent, "POST /api/CardTokens", trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(attribute.String("http.request.method", r.Method),
 				attribute.String("http.route", "/api/CardTokens"), attribute.String("request_id", requestID)))
-		r = r.WithContext(ctx)
 		writer := chimiddleware.NewWrapResponseWriter(w, r.ProtoMajor)
-		w = writer
 		completed := false
 		defer func() {
 			status := httpresponse.ObservedStatus(writer.Status(), completed)
@@ -83,27 +101,23 @@ func (h *CardTokensHandler) PostHandler() http.HandlerFunc {
 			}
 			span.End()
 		}()
-		merchantID := middleware.MerchantIDFromContext(r.Context())
-		request, ok := modelbinding.BindJSON[models.CreateCardTokenRequest](w, r)
-		if !ok {
-			completed = true
-			return
-		}
-
-		response, err := h.service.Issue(r.Context(), merchantID, *request)
-		if err != nil {
-			var validation *services.ValidationError
-			if errors.As(err, &validation) {
-				httpresponse.WriteProblem(w, http.StatusBadRequest, requestID, validation.Errors)
-			} else {
-				log.Printf("Card token issuance failed (request_id=%s): %v", requestID, err)
-				httpresponse.WriteProblem(w, http.StatusInternalServerError, requestID, nil)
-			}
-			completed = true
-			return
-		}
-		response.RequestID = requestID
-		httpresponse.WriteJSON(w, http.StatusOK, "application/json", response)
+		next(writer, r.WithContext(ctx))
 		completed = true
 	}
+}
+
+func writeCardTokenResponse(ctx context.Context, w http.ResponseWriter, response *models.CardTokenResponse) {
+	response.RequestID = middleware.GetRequestID(ctx)
+	httpresponse.WriteJSON(w, http.StatusOK, "application/json", response)
+}
+
+func writeCardTokenError(ctx context.Context, w http.ResponseWriter, err error) {
+	requestID := middleware.GetRequestID(ctx)
+	var validation *services.ValidationError
+	if errors.As(err, &validation) {
+		httpresponse.WriteProblem(w, http.StatusBadRequest, requestID, validation.Errors)
+		return
+	}
+	log.Printf("Card token issuance failed (request_id=%s): %v", requestID, err)
+	httpresponse.WriteProblem(w, http.StatusInternalServerError, requestID, nil)
 }

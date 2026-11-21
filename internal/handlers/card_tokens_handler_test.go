@@ -148,15 +148,26 @@ func TestCardTokenHandlerTracesOnlyHandlerExecutionWithoutCardData(t *testing.T)
 	previous := otel.GetTextMapPropagator()
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	defer otel.SetTextMapPropagator(previous)
+	validationFields := map[string][]string{"expiry_month": {"The card has expired."}}
 	for _, test := range []struct {
 		name, authorization, body string
 		status                    int
-		fail                      bool
+		issuer                    CardTokenIssuer
+		fields                    map[string][]string
 	}{
-		{"issued", "Bearer sk_cards", cardTokenBody, 200, false},
-		{"binding error", "Bearer sk_cards", "{", 400, false},
-		{"issuance error", "Bearer sk_cards", cardTokenBody, 500, true},
-		{"before handler", "", cardTokenBody, 401, false},
+		{"issued", "Bearer sk_cards", cardTokenBody, 200, nil, nil},
+		{"binding error", "Bearer sk_cards", "{", 400, nil, nil},
+		{"issuance error", "Bearer sk_cards", cardTokenBody, 500, failingCardTokenIssuer{}, nil},
+		{"validation error", "Bearer sk_cards", cardTokenBody, 400,
+			cardTokenIssuerFunc(func(context.Context, string, models.CreateCardTokenRequest) (*models.CardTokenResponse, error) {
+				return nil, fmt.Errorf("issue failed: %w", &services.ValidationError{Errors: validationFields})
+			}), validationFields},
+		{"nil response", "Bearer sk_cards", cardTokenBody, 500,
+			cardTokenIssuerFunc(func(context.Context, string, models.CreateCardTokenRequest) (*models.CardTokenResponse, error) {
+				return nil, nil
+			}), nil},
+		{"before handler", "", cardTokenBody, 401, nil, nil},
+		{"insufficient scope", "Bearer sk_read", cardTokenBody, 403, nil, nil},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			recorder := tracetest.NewSpanRecorder()
@@ -164,18 +175,28 @@ func TestCardTokenHandlerTracesOnlyHandlerExecutionWithoutCardData(t *testing.T)
 			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
 			handler, _, endpoint := cardTokenHandler(t)
 			handler.tracer = provider.Tracer("test")
-			if test.fail {
-				handler.service = failingCardTokenIssuer{}
+			if test.issuer != nil {
+				handler.service = test.issuer
 			}
 			request := httptest.NewRequest(http.MethodPost, "/api/CardTokens?cvv=private-query", strings.NewReader(test.body))
 			request.Header.Set("Authorization", test.authorization)
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("traceparent", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01")
 			response := httptest.NewRecorder()
-			endpoint.ServeHTTP(response, request)
+			require.NotPanics(t, func() { endpoint.ServeHTTP(response, request) })
 			require.Equal(t, test.status, response.Code)
+			if test.status >= 400 {
+				problem := paymentProblem(t, response, test.status)
+				if test.fields != nil {
+					assert.Equal(t, test.fields, problem.Errors)
+				}
+				if test.status == 500 {
+					assert.Empty(t, problem.Detail)
+					assert.Empty(t, problem.Errors)
+				}
+			}
 			spans := recorder.Ended()
-			if test.status == 401 {
+			if test.status == 401 || test.status == 403 {
 				assert.Empty(t, spans)
 				return
 			}
@@ -194,7 +215,7 @@ func TestCardTokenHandlerTracesOnlyHandlerExecutionWithoutCardData(t *testing.T)
 			assert.EqualValues(t, test.status, attributes["http.response.status_code"])
 			assert.Equal(t, response.Header().Get("X-Request-Id"), attributes["request_id"])
 			assert.Equal(t, "/api/CardTokens", attributes["http.route"])
-			if test.fail {
+			if test.status >= 500 {
 				assert.Equal(t, codes.Error, span.Status().Code)
 			} else {
 				assert.Equal(t, codes.Unset, span.Status().Code)
@@ -204,6 +225,43 @@ func TestCardTokenHandlerTracesOnlyHandlerExecutionWithoutCardData(t *testing.T)
 			}
 		})
 	}
+}
+
+type cardTokenIssuerFunc func(context.Context, string, models.CreateCardTokenRequest) (*models.CardTokenResponse, error)
+
+func (issue cardTokenIssuerFunc) Issue(ctx context.Context, merchantID string, request models.CreateCardTokenRequest) (*models.CardTokenResponse, error) {
+	return issue(ctx, merchantID, request)
+}
+
+func TestCardTokenHandlerTraceEndsOnPanic(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	handler, _, endpoint := cardTokenHandler(t)
+	handler.tracer = provider.Tracer("test")
+	const panicValue = "private issuer failure"
+	handler.service = cardTokenIssuerFunc(func(ctx context.Context, _ string, _ models.CreateCardTokenRequest) (*models.CardTokenResponse, error) {
+		assert.True(t, trace.SpanFromContext(ctx).IsRecording(), "the issuer must receive the handler span")
+		panic(panicValue)
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/CardTokens", strings.NewReader(cardTokenBody))
+	request.Header.Set("Authorization", "Bearer sk_cards")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	require.PanicsWithValue(t, panicValue, func() { endpoint.ServeHTTP(response, request) })
+	assert.Empty(t, response.Body.String(), "tracing must not swallow the panic or fabricate an HTTP response")
+	spans := recorder.Ended()
+	require.Len(t, spans, 1)
+	span := spans[0]
+	assert.Equal(t, codes.Error, span.Status().Code)
+	attributes := make(map[string]interface{})
+	for _, attr := range span.Attributes() {
+		attributes[string(attr.Key)] = attr.Value.AsInterface()
+	}
+	assert.EqualValues(t, http.StatusInternalServerError, attributes["http.response.status_code"])
+	assert.Equal(t, response.Header().Get("X-Request-Id"), attributes["request_id"])
+	assert.False(t, span.EndTime().Before(span.StartTime()))
+	assert.NotContains(t, fmt.Sprint(attributes, span.Events(), span.Status()), panicValue)
 }
 
 type failingCardTokenIssuer struct{}
