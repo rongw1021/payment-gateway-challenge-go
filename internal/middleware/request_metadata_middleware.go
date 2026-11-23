@@ -2,28 +2,33 @@ package middleware
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/httpresponse"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/identifiers"
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/requestcontext"
 )
 
-type requestIDKey struct{}
-type idempotencyKey struct{}
+type requestIDKey = requestcontext.RequestIDKey
+type idempotencyKey = requestcontext.IdempotencyKey
 
-func RequestID(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestID, err := identifiers.NewUUID()
-		if err != nil {
-			log.Printf("Generate request ID: %v", err)
-			httpresponse.WriteProblem(w, http.StatusInternalServerError, "", nil)
-			return
-		}
-		w.Header().Set("X-Request-Id", requestID)
-		ctx := WithRequestID(r.Context(), requestID)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+func RequestID(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestID, err := identifiers.NewUUID()
+			if err != nil {
+				logger.ErrorContext(r.Context(), "failed to generate request ID", "error", err)
+				if err := httpresponse.WriteProblem(w, http.StatusInternalServerError, "", nil); err != nil {
+					logger.ErrorContext(r.Context(), "failed to write HTTP response", "error", err)
+				}
+				return
+			}
+			w.Header().Set("X-Request-Id", requestID)
+			ctx := WithRequestID(r.Context(), requestID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
 }
 
 func WithRequestID(ctx context.Context, requestID string) context.Context {
@@ -35,18 +40,22 @@ func GetRequestID(ctx context.Context) string {
 	return id
 }
 
-func RequireIdempotencyKey(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		values := r.Header.Values("X-Idempotency-Key")
-		if len(values) != 1 || !identifiers.IsCanonicalUUID(values[0]) {
-			httpresponse.WriteProblem(w, http.StatusBadRequest, GetRequestID(r.Context()), map[string][]string{
-				"idempotency_key": {"Supply exactly one idempotency key in lowercase hyphenated GUID format."},
-			})
-			return
-		}
-		ctx := context.WithValue(r.Context(), idempotencyKey{}, values[0])
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+func RequireIdempotencyKey(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			values := r.Header.Values("X-Idempotency-Key")
+			if len(values) != 1 || !identifiers.IsCanonicalUUID(values[0]) {
+				if err := httpresponse.WriteProblem(w, http.StatusBadRequest, GetRequestID(r.Context()), map[string][]string{
+					"idempotency_key": {"Supply exactly one idempotency key in lowercase hyphenated GUID format."},
+				}); err != nil {
+					logger.ErrorContext(r.Context(), "failed to write HTTP response", "error", err)
+				}
+				return
+			}
+			ctx := context.WithValue(r.Context(), idempotencyKey{}, values[0])
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
 }
 
 // IdempotencyKeyFromContext requires RequireIdempotencyKey; a missing key is a wiring error.

@@ -53,7 +53,8 @@ observability:
   metrics:
     export_interval: 10s
 rate_limit:
-  requests_per_second: 25
+  global_requests_per_second: 25
+  per_merchant_requests_per_second: 5
 `, address, hex.EncodeToString(hash[:]))
 }
 
@@ -87,7 +88,8 @@ func TestLoadSelectsEnvironmentAndDecodesTypedConfiguration(t *testing.T) {
 	assert.Equal(t, "http://localhost:4318", cfg.Observability.OTLP.Endpoint)
 	assert.Equal(t, 10*time.Second, cfg.Observability.Metrics.ExportInterval)
 	assert.Equal(t, 3*time.Second, cfg.Observability.OTLP.Timeout)
-	assert.EqualValues(t, 25, cfg.RateLimit.RequestsPerSecond)
+	assert.EqualValues(t, 25, cfg.RateLimit.GlobalRequestsPerSecond)
+	assert.EqualValues(t, 5, cfg.RateLimit.PerMerchantRequestsPerSecond)
 	auth, err := middleware.NewAuthenticator(cfg.Authentication.APIKeys)
 	require.NoError(t, err)
 	merchant, err := auth.Authenticate(http.Header{"Authorization": {"Bearer sk_test-payload"}})
@@ -99,11 +101,33 @@ func TestLoadSelectsEnvironmentAndDecodesTypedConfiguration(t *testing.T) {
 func TestLoadDefaultsMissingRateLimitForExistingProfiles(t *testing.T) {
 	directory := configDirectory(t)
 	t.Setenv("ENVIRONMENT", "test")
-	content := strings.Replace(validConfig(":8090"), "rate_limit:\n  requests_per_second: 25\n", "", 1)
+	content := strings.Replace(validConfig(":8090"), "rate_limit:\n  global_requests_per_second: 25\n  per_merchant_requests_per_second: 5\n", "", 1)
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "config.test.yaml"), []byte(content), 0600))
 	cfg, err := Load()
 	require.NoError(t, err)
-	assert.EqualValues(t, 100, cfg.RateLimit.RequestsPerSecond)
+	assert.EqualValues(t, 100, cfg.RateLimit.GlobalRequestsPerSecond)
+	assert.EqualValues(t, 10, cfg.RateLimit.PerMerchantRequestsPerSecond)
+}
+
+func TestLoadDefaultsEachOmittedRateLimit(t *testing.T) {
+	directory := configDirectory(t)
+	t.Setenv("ENVIRONMENT", "test")
+	for _, test := range []struct {
+		name, omit       string
+		global, merchant int
+	}{
+		{"global omitted", "  global_requests_per_second: 25\n", 100, 5},
+		{"merchant omitted", "  per_merchant_requests_per_second: 5\n", 25, 10},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			content := strings.Replace(validConfig(":8090"), test.omit, "", 1)
+			require.NoError(t, os.WriteFile(filepath.Join(directory, "config.test.yaml"), []byte(content), 0600))
+			cfg, err := Load()
+			require.NoError(t, err)
+			assert.EqualValues(t, test.global, cfg.RateLimit.GlobalRequestsPerSecond)
+			assert.EqualValues(t, test.merchant, cfg.RateLimit.PerMerchantRequestsPerSecond)
+		})
+	}
 }
 
 func TestLoadServerTimeoutDefaultsAndOverrides(t *testing.T) {
@@ -202,9 +226,12 @@ func TestLoadRejectsInvalidYAMLAndSchema(t *testing.T) {
 		{"unknown reconciliation field", strings.Replace(valid, "batch_size:", "batch_szie:", 1)},
 		{"unknown OTLP field", strings.Replace(valid, "endpoint:", "endpont:", 1)},
 		{"unknown metric field", strings.Replace(valid, "export_interval:", "export_intervl:", 1)},
-		{"unknown limiter field", strings.Replace(valid, "requests_per_second:", "request_per_second:", 1)},
-		{"fractional rate", strings.Replace(valid, "requests_per_second: 25", "requests_per_second: 1.5", 1)},
-		{"overflow rate", strings.Replace(valid, "requests_per_second: 25", "requests_per_second: 2147483648", 1)},
+		{"unknown limiter field", strings.Replace(valid, "global_requests_per_second:", "global_request_per_second:", 1)},
+		{"legacy limiter field", strings.Replace(valid, "global_requests_per_second:", "requests_per_second:", 1)},
+		{"fractional global rate", strings.Replace(valid, "global_requests_per_second: 25", "global_requests_per_second: 1.5", 1)},
+		{"overflow global rate", strings.Replace(valid, "global_requests_per_second: 25", "global_requests_per_second: 2147483648", 1)},
+		{"fractional merchant rate", strings.Replace(valid, "per_merchant_requests_per_second: 5", "per_merchant_requests_per_second: 1.5", 1)},
+		{"overflow merchant rate", strings.Replace(valid, "per_merchant_requests_per_second: 5", "per_merchant_requests_per_second: 2147483648", 1)},
 		{"legacy logging section", valid + "\nlogging:\n  elasticsearch:\n    enabled: false\n"},
 		{"legacy telemetry section", valid + "\ntelemetry:\n  enabled: false\n"},
 		{"duplicate key", strings.Replace(valid, `address: ":8090"`, "address: ':8090'\n  address: ':9000'", 1)},
@@ -240,14 +267,24 @@ func TestDecodedConfigurationUsesExistingStartupValidators(t *testing.T) {
 				_, err := middleware.NewAuthenticator(cfg.Authentication.APIKeys)
 				return err
 			}},
-		{"zero rate", strings.Replace(valid, "requests_per_second: 25", "requests_per_second: 0", 1),
+		{"zero global rate", strings.Replace(valid, "global_requests_per_second: 25", "global_requests_per_second: 0", 1),
 			func(cfg *Config) error {
-				_, err := middleware.NewRateLimiter(int(cfg.RateLimit.RequestsPerSecond))
+				_, err := middleware.NewRateLimiter(int(cfg.RateLimit.GlobalRequestsPerSecond))
 				return err
 			}},
-		{"negative rate", strings.Replace(valid, "requests_per_second: 25", "requests_per_second: -1", 1),
+		{"negative global rate", strings.Replace(valid, "global_requests_per_second: 25", "global_requests_per_second: -1", 1),
 			func(cfg *Config) error {
-				_, err := middleware.NewRateLimiter(int(cfg.RateLimit.RequestsPerSecond))
+				_, err := middleware.NewRateLimiter(int(cfg.RateLimit.GlobalRequestsPerSecond))
+				return err
+			}},
+		{"zero merchant rate", strings.Replace(valid, "per_merchant_requests_per_second: 5", "per_merchant_requests_per_second: 0", 1),
+			func(cfg *Config) error {
+				_, err := middleware.NewMerchantRateLimiter([]string{"test-merchant"}, int(cfg.RateLimit.PerMerchantRequestsPerSecond))
+				return err
+			}},
+		{"negative merchant rate", strings.Replace(valid, "per_merchant_requests_per_second: 5", "per_merchant_requests_per_second: -1", 1),
+			func(cfg *Config) error {
+				_, err := middleware.NewMerchantRateLimiter([]string{"test-merchant"}, int(cfg.RateLimit.PerMerchantRequestsPerSecond))
 				return err
 			}},
 		{"invalid bank URL", strings.Replace(valid, "http://localhost:8080/", "relative/", 1),

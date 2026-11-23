@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/changedatacapture"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,6 +26,19 @@ type intentChanges struct {
 	events  []models.BankTransactionChangeEvent
 	observe func(models.BankTransactionChangeEvent)
 	err     error
+}
+
+type paymentIntentChanges struct {
+	events []models.PaymentIntentChangeEvent
+	err    error
+}
+
+func (c *paymentIntentChanges) Produce(event models.PaymentIntentChangeEvent) error {
+	if c.err != nil {
+		return c.err
+	}
+	c.events = append(c.events, event.WithSequence(int64(len(c.events)+1)))
+	return nil
 }
 
 func (c *intentChanges) Produce(event models.BankTransactionChangeEvent) error {
@@ -46,7 +60,7 @@ func intentRepository(t *testing.T) (*PaymentIntentsRepository, *intentChanges, 
 	clock := &atomic.Int64{}
 	clock.Store(time.Date(2030, 4, 10, 12, 0, 0, 0, time.UTC).UnixNano())
 	changes := &intentChanges{}
-	repo, err := NewPaymentIntentsRepository(changes, func() time.Time { return time.Unix(0, clock.Load()).UTC() })
+	repo, err := NewPaymentIntentsRepository(changes, changedatacapture.NewInMemory[models.PaymentIntentChangeEvent](), func() time.Time { return time.Unix(0, clock.Load()).UTC() })
 	require.NoError(t, err)
 	return repo, changes, clock
 }
@@ -54,7 +68,7 @@ func intentRepository(t *testing.T) (*PaymentIntentsRepository, *intentChanges, 
 func createIntent(t *testing.T, repo *PaymentIntentsRepository, merchant, key string) models.PaymentIntent {
 	t.Helper()
 	amount := int32(100)
-	intent, hasConflict, err := repo.CreatePaymentIntent(merchant, key, models.CreatePaymentIntentRequest{Currency: "GBP", Amount: &amount})
+	intent, hasConflict, err := repo.CreatePaymentIntent(merchant, key, "creation-request", models.CreatePaymentIntentRequest{Currency: "GBP", Amount: &amount})
 	require.NoError(t, err)
 	require.False(t, hasConflict)
 	return intent
@@ -77,6 +91,8 @@ func createIntentTransaction(t *testing.T, repo *PaymentIntentsRepository, inten
 
 func TestPaymentIntentCreationIsMerchantScopedAndConcurrentIdempotent(t *testing.T) {
 	repo, changes, _ := intentRepository(t)
+	intentEvents := &paymentIntentChanges{}
+	repo.paymentIntentChange = intentEvents
 	amount := int32(100)
 	request := models.CreatePaymentIntentRequest{Currency: "GBP", Amount: &amount}
 	results := make(chan models.PaymentIntent, 16)
@@ -85,7 +101,7 @@ func TestPaymentIntentCreationIsMerchantScopedAndConcurrentIdempotent(t *testing
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			intent, hasConflict, err := repo.CreatePaymentIntent("merchant", "private-key", request)
+			intent, hasConflict, err := repo.CreatePaymentIntent("merchant", "private-key", "creation-request", request)
 			assert.NoError(t, err)
 			assert.False(t, hasConflict)
 			results <- intent
@@ -103,12 +119,13 @@ func TestPaymentIntentCreationIsMerchantScopedAndConcurrentIdempotent(t *testing
 		assert.NotNil(t, intent.BankTransactions)
 	}
 	assert.Len(t, repo.paymentIntents, 1)
+	require.Len(t, intentEvents.events, 1, "concurrent matching creations emit one event")
 	assert.Regexp(t, "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", id)
 	for _, changed := range []models.CreatePaymentIntentRequest{
 		{Currency: "USD", Amount: &amount},
 		{Currency: "GBP", Amount: new(int32)},
 	} {
-		intent, hasConflict, err := repo.CreatePaymentIntent("merchant", "private-key", changed)
+		intent, hasConflict, err := repo.CreatePaymentIntent("merchant", "private-key", "creation-request", changed)
 		require.NoError(t, err)
 		assert.True(t, hasConflict)
 		assert.Equal(t, int32(100), intent.Amount)
@@ -120,6 +137,153 @@ func TestPaymentIntentCreationIsMerchantScopedAndConcurrentIdempotent(t *testing
 	require.NoError(t, err)
 	assert.Nil(t, missing)
 	assert.Empty(t, changes.events)
+	require.Len(t, intentEvents.events, 2, "only the two merchants' creations emit intent events")
+}
+
+func TestPaymentIntentEventsTrackActualStateChangesAndTimestamps(t *testing.T) {
+	repo, bankEvents, clock := intentRepository(t)
+	intentEvents := &paymentIntentChanges{}
+	repo.paymentIntentChange = intentEvents
+	now := func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+	intent := createIntent(t, repo, "merchant", "private-create-key")
+	assert.Equal(t, now(), intent.CreatedAt)
+	assert.Equal(t, intent.CreatedAt, intent.UpdatedAt)
+	require.Len(t, intentEvents.events, 1)
+	createdEvent := intentEvents.events[0]
+	assert.Equal(t, models.PaymentIntentCreatedEvent, createdEvent.EventType)
+	assert.Equal(t, "creation-request", createdEvent.RequestID)
+	require.NotNil(t, createdEvent.PaymentIntent)
+	assert.Equal(t, intent.CreatedAt, createdEvent.PaymentIntent.CreatedAt)
+	assert.Equal(t, int32(100), createdEvent.PaymentIntent.Amount)
+	assert.Equal(t, "GBP", createdEvent.PaymentIntent.Currency)
+	originalEventJSON, err := json.Marshal(createdEvent)
+	require.NoError(t, err)
+
+	clock.Add(int64(time.Second))
+	first := createIntentTransaction(t, repo, intent, "first")
+	clock.Add(int64(time.Second))
+	_, err = repo.CompleteBankTransaction("merchant", first.BankTransactionID, models.BankTransactionDeclined, nil)
+	require.NoError(t, err)
+	clock.Add(int64(time.Second))
+	second := createIntentTransaction(t, repo, intent, "second")
+	clock.Add(int64(30 * time.Second))
+	marked, err := repo.TryMarkTimedOutBankTransaction("merchant", second.BankTransactionID, now())
+	require.NoError(t, err)
+	assert.True(t, marked)
+	pending, err := repo.GetPaymentIntent("merchant", intent.PaymentIntentID)
+	require.NoError(t, err)
+	assert.Equal(t, now(), pending.UpdatedAt)
+	require.Len(t, intentEvents.events, 5)
+
+	clock.Add(int64(time.Second))
+	_, err = repo.CompleteBankTransaction("merchant", second.BankTransactionID, models.BankTransactionNetworkError, nil)
+	require.NoError(t, err)
+	stillPending, err := repo.GetPaymentIntent("merchant", intent.PaymentIntentID)
+	require.NoError(t, err)
+	assert.Equal(t, pending.UpdatedAt, stillPending.UpdatedAt)
+	assert.Len(t, intentEvents.events, 5, "a changed bank uncertainty reason is not a changed intent state")
+	assert.Len(t, bankEvents.events, 5, "the independent bank event is still published")
+
+	clock.Add(int64(time.Second))
+	_, err = repo.CompleteBankTransaction("merchant", second.BankTransactionID, models.BankTransactionAuthorized, nil)
+	require.NoError(t, err)
+	current, err := repo.GetPaymentIntent("merchant", intent.PaymentIntentID)
+	require.NoError(t, err)
+	assert.Equal(t, intent.CreatedAt, current.CreatedAt)
+	assert.Equal(t, now(), current.UpdatedAt)
+	require.Len(t, intentEvents.events, 6)
+	statuses := []models.PaymentIntentStatus{
+		models.PaymentIntentCreated, models.PaymentIntentProcessing, models.PaymentIntentDeclined,
+		models.PaymentIntentProcessing, models.PaymentIntentPendingVerification, models.PaymentIntentAuthorized,
+	}
+	for i, event := range intentEvents.events {
+		assert.EqualValues(t, i+1, event.Sequence)
+		assert.Equal(t, "merchant", event.MerchantID)
+		assert.Equal(t, intent.PaymentIntentID, event.PaymentIntentID)
+		if i == 0 {
+			continue
+		}
+		assert.Equal(t, models.PaymentIntentUpdatedEvent, event.EventType)
+		assert.Equal(t, "original-request", event.RequestID)
+		assert.Nil(t, event.PaymentIntent)
+		require.Len(t, event.Changes, 2)
+		assert.Equal(t, "Status", event.Changes[0].FieldName)
+		assert.JSONEq(t, fmt.Sprintf("%q", statuses[i-1]), string(event.Changes[0].OriginalValue))
+		assert.JSONEq(t, fmt.Sprintf("%q", statuses[i]), string(event.Changes[0].NewValue))
+		assert.Equal(t, "UpdatedAt", event.Changes[1].FieldName)
+	}
+
+	clock.Add(int64(time.Minute))
+	replay := createIntent(t, repo, "merchant", "private-create-key")
+	assert.Equal(t, current.UpdatedAt, replay.UpdatedAt)
+	_, _, _, err = repo.CreateBankTransaction("merchant", intent.PaymentIntentID, "first", "replay-request",
+		models.ConfirmPaymentIntentRequest{CardToken: intentCardToken}, func() (*models.CreateCardTokenRequest, error) {
+			t.Fatal("historical replay must not consume a token")
+			return nil, nil
+		})
+	require.NoError(t, err)
+	_, _, _, err = repo.CreateBankTransaction("merchant", intent.PaymentIntentID, "new", "request",
+		models.ConfirmPaymentIntentRequest{CardToken: intentCardToken}, consumeIntentCard)
+	assert.ErrorIs(t, err, models.ErrIntentNotPayable)
+	_, err = repo.CompleteBankTransaction("merchant", second.BankTransactionID, models.BankTransactionAuthorized, nil)
+	require.NoError(t, err)
+	assert.Len(t, intentEvents.events, 6)
+	unchanged, err := repo.GetPaymentIntent("merchant", intent.PaymentIntentID)
+	require.NoError(t, err)
+	assert.Equal(t, current.UpdatedAt, unchanged.UpdatedAt)
+	historicalJSON, err := json.Marshal(createdEvent)
+	require.NoError(t, err)
+	assert.Equal(t, originalEventJSON, historicalJSON)
+	allEvents, err := json.Marshal(intentEvents.events)
+	require.NoError(t, err)
+	for _, private := range []string{"private-create-key", intentCardToken, "bank_transactions", "idempotency_key", "fingerprint", "cvv", "0222405343240007"} {
+		assert.NotContains(t, string(allEvents), private)
+	}
+}
+
+func TestPaymentIntentPublicationFailuresRetainStateAndAttemptBothStreams(t *testing.T) {
+	for _, stage := range []string{"create", "reserve", "complete"} {
+		t.Run(stage, func(t *testing.T) {
+			repo, bankEvents, clock := intentRepository(t)
+			intentEvents := &paymentIntentChanges{}
+			repo.paymentIntentChange = intentEvents
+			intentFailure := errors.New("intent event publication failed")
+			if stage == "create" {
+				intentEvents.err = intentFailure
+				amount := int32(100)
+				_, _, err := repo.CreatePaymentIntent("merchant", "key", "request", models.CreatePaymentIntentRequest{Currency: "GBP", Amount: &amount})
+				require.ErrorIs(t, err, intentFailure)
+				require.Len(t, repo.paymentIntents, 1)
+				stored := repo.paymentIntents[0]
+				clock.Add(int64(time.Minute))
+				replay := createIntent(t, repo, "merchant", "key")
+				assert.Equal(t, stored.CreatedAt, replay.CreatedAt)
+				assert.Equal(t, stored.UpdatedAt, replay.UpdatedAt)
+				assert.Empty(t, intentEvents.events)
+				return
+			}
+			intent := createIntent(t, repo, "merchant", "key")
+			var transaction models.BankTransaction
+			if stage == "complete" {
+				transaction = createIntentTransaction(t, repo, intent, "confirm")
+			}
+			intentEvents.err = intentFailure
+			if stage == "reserve" {
+				_, _, _, err := repo.CreateBankTransaction("merchant", intent.PaymentIntentID, "confirm", "request",
+					models.ConfirmPaymentIntentRequest{CardToken: intentCardToken}, consumeIntentCard)
+				require.ErrorIs(t, err, intentFailure)
+				assert.Len(t, bankEvents.events, 1)
+				assert.Equal(t, models.PaymentIntentProcessing, repo.paymentIntents[0].Status)
+			} else {
+				bankFailure := errors.New("bank event publication failed")
+				bankEvents.err = bankFailure
+				_, err := repo.CompleteBankTransaction("merchant", transaction.BankTransactionID, models.BankTransactionAuthorized, nil)
+				require.ErrorIs(t, err, bankFailure)
+				require.ErrorIs(t, err, intentFailure, "both publications must be attempted")
+				assert.Equal(t, models.PaymentIntentAuthorized, repo.paymentIntents[0].Status)
+			}
+		})
+	}
 }
 
 func TestPaymentIntentReservationChecksPrecedeCardConsumption(t *testing.T) {

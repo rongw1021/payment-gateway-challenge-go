@@ -92,10 +92,11 @@ func TestIntegrationScenarios(t *testing.T) {
 	}
 	bankClient, err := banksimulator.NewClient(bank.URL+"/", 5*time.Second)
 	require.NoError(t, err)
-	gateway, err := api.New(credentials, bankClient, changedatacapture.NewInMemory(),
+	t.Cleanup(bankClient.CloseIdleConnections)
+	gateway, err := api.New(credentials, bankClient, changedatacapture.NewStreams(),
 		backgroundservices.CronJobOptions{
 			SweepInterval: time.Second, BankTransactionStatusUpdateTimeout: 30 * time.Second, BatchSize: 100,
-		}, 100)
+		}, 100, 10, slog.Default())
 	require.NoError(t, err)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

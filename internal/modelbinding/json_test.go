@@ -43,7 +43,8 @@ func TestBindJSONValidatesCardTokenDetails(t *testing.T) {
 			request.Header.Set("Content-Type", "application/json")
 			response := httptest.NewRecorder()
 
-			model, ok := BindJSON[models.CreateCardTokenRequest](response, request)
+			model, ok, err := BindJSON[models.CreateCardTokenRequest](response, request)
+			require.NoError(t, err)
 
 			assert.False(t, ok)
 			assert.Nil(t, model)
@@ -65,7 +66,8 @@ func TestBindJSONAcceptsCardNumberAndCVVLengthBoundaries(t *testing.T) {
 			request.Header.Set("Content-Type", "application/json")
 			response := httptest.NewRecorder()
 
-			model, ok := BindJSON[models.CreateCardTokenRequest](response, request)
+			model, ok, err := BindJSON[models.CreateCardTokenRequest](response, request)
+			require.NoError(t, err)
 
 			require.True(t, ok)
 			require.NotNil(t, model)
@@ -94,7 +96,8 @@ func TestBindJSONValidatesPaymentIntent(t *testing.T) {
 			request.Header.Set("Content-Type", "application/json")
 			response := httptest.NewRecorder()
 
-			model, ok := BindJSON[models.CreatePaymentIntentRequest](response, request)
+			model, ok, err := BindJSON[models.CreatePaymentIntentRequest](response, request)
+			require.NoError(t, err)
 
 			assert.False(t, ok)
 			assert.Nil(t, model)
@@ -122,7 +125,8 @@ func TestBindJSONPreservesValidPaymentIntentAmounts(t *testing.T) {
 			request.Header.Set("Content-Type", "application/json")
 			response := httptest.NewRecorder()
 
-			model, ok := BindJSON[models.CreatePaymentIntentRequest](response, request)
+			model, ok, err := BindJSON[models.CreatePaymentIntentRequest](response, request)
+			require.NoError(t, err)
 
 			require.True(t, ok)
 			require.NotNil(t, model)
@@ -155,7 +159,8 @@ func TestBindJSONValidatesConfirmationToken(t *testing.T) {
 			request.Header.Set("Content-Type", "application/json")
 			response := httptest.NewRecorder()
 
-			model, ok := BindJSON[models.ConfirmPaymentIntentRequest](response, request)
+			model, ok, err := BindJSON[models.ConfirmPaymentIntentRequest](response, request)
+			require.NoError(t, err)
 
 			assert.Equal(t, test.valid, ok)
 			if test.valid {

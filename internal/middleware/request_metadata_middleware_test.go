@@ -1,13 +1,17 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/logging"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,7 +52,7 @@ func TestRequireIdempotencyKeyRejectsInvalidHeadersBeforeHandler(t *testing.T) {
 				assert.Equal(t, test.values[0], IdempotencyKeyFromContext(r.Context()))
 				w.WriteHeader(http.StatusNoContent)
 			})
-			handler := RequestID(RequireIdempotencyKey(next))
+			handler := RequestID(slog.Default())(RequireIdempotencyKey(slog.Default())(next))
 			request := httptest.NewRequest(http.MethodPost, "/", nil)
 			request = request.WithContext(context.WithValue(request.Context(), idempotencyKey{}, "stale-context-key"))
 			for _, value := range test.values {
@@ -79,4 +83,78 @@ func TestIdempotencyKeyFromContextRequiresMiddleware(t *testing.T) {
 	assert.PanicsWithValue(t, "idempotency middleware did not provide a valid key", func() {
 		IdempotencyKeyFromContext(context.Background())
 	})
+}
+
+type failedMiddlewareWriter struct {
+	header   http.Header
+	statuses []int
+	writes   int
+}
+
+func (w *failedMiddlewareWriter) Header() http.Header    { return w.header }
+func (w *failedMiddlewareWriter) WriteHeader(status int) { w.statuses = append(w.statuses, status) }
+func (w *failedMiddlewareWriter) Write([]byte) (int, error) {
+	w.writes++
+	return 0, io.ErrClosedPipe
+}
+
+func TestMiddlewareLogsFailedResponsesWithInjectedLogger(t *testing.T) {
+	for _, kind := range []string{"unauthorized", "forbidden", "idempotency", "rate limit", "merchant rate limit", "recovery"} {
+		t.Run(kind, func(t *testing.T) {
+			var output bytes.Buffer
+			logger := logging.NewConsole(&output)
+			auth, err := NewAuthenticator([]APIKeyCredential{testCredential()})
+			require.NoError(t, err)
+			next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("rejected request reached endpoint") })
+			var handler http.Handler
+			status, count := http.StatusBadRequest, 1
+			switch kind {
+			case "unauthorized":
+				handler = auth.RequireScope(CardTokensCreate, logger)(next)
+				status = http.StatusUnauthorized
+			case "forbidden":
+				handler = auth.RequireScope(PaymentIntentsRead, logger)(next)
+				status = http.StatusForbidden
+			case "idempotency":
+				handler = RequireIdempotencyKey(logger)(next)
+			case "rate limit":
+				limiter, err := NewRateLimiter(1)
+				require.NoError(t, err)
+				require.True(t, limiter.allow())
+				handler = limiter.Limit(logger)(next)
+				status = http.StatusTooManyRequests
+			case "merchant rate limit":
+				id := testCredential().MerchantID
+				limiter, err := NewMerchantRateLimiter([]string{id}, 1)
+				require.NoError(t, err)
+				require.True(t, limiter.limiters[id].allow())
+				handler = auth.RequireScope(CardTokensCreate, logger)(limiter.Limit(logger)(next))
+				status = http.StatusTooManyRequests
+			case "recovery":
+				handler = Recover(logger)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("private-panic") }))
+				status, count = http.StatusInternalServerError, 2
+			}
+			request := httptest.NewRequest(http.MethodPost, "/api/CardTokens", nil)
+			if kind == "forbidden" || kind == "merchant rate limit" {
+				request.Header.Set("Authorization", "Bearer sk_test-payload")
+			}
+			response := &failedMiddlewareWriter{header: make(http.Header)}
+			RequestID(logger)(handler).ServeHTTP(response, request)
+			assert.Equal(t, []int{status}, response.statuses)
+			assert.Equal(t, 1, response.writes)
+			decoder := json.NewDecoder(&output)
+			var record map[string]interface{}
+			for i := 0; i < count; i++ {
+				require.NoError(t, decoder.Decode(&record))
+				assert.Equal(t, "ERROR", record["level"])
+				assert.Equal(t, response.Header().Get("X-Request-Id"), record["request_id"])
+			}
+			assert.Equal(t, "failed to write HTTP response", record["message"])
+			assert.Contains(t, record["error"], io.ErrClosedPipe.Error())
+			if kind == "forbidden" || kind == "merchant rate limit" {
+				assert.Equal(t, testCredential().MerchantID, record["merchant_id"])
+			}
+			assert.ErrorIs(t, decoder.Decode(&record), io.EOF)
+		})
+	}
 }

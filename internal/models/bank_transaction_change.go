@@ -5,8 +5,8 @@ import "encoding/json"
 type BankTransactionEventType string
 
 const (
-	BankTransactionCreated BankTransactionEventType = "Created"
-	BankTransactionUpdated BankTransactionEventType = "Updated"
+	BankTransactionCreated BankTransactionEventType = "banktransaction.created"
+	BankTransactionUpdated BankTransactionEventType = "banktransaction.updated"
 )
 
 type BankTransactionFieldChange struct {
@@ -24,4 +24,9 @@ type BankTransactionChangeEvent struct {
 	BankTransactionID string                       `json:"bank_transaction_id" format:"uuid"`
 	BankTransaction   *BankTransaction             `json:"bank_transaction"`
 	Changes           []BankTransactionFieldChange `json:"changes"`
+}
+
+func (e BankTransactionChangeEvent) WithSequence(sequence int64) BankTransactionChangeEvent {
+	e.Sequence = sequence
+	return e
 }

@@ -1,17 +1,22 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/logging"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/models"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/repository"
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/requestcontext"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,13 +25,31 @@ func validCard() models.CreateCardTokenRequest {
 	return models.CreateCardTokenRequest{CardNumber: "0222405343240007", ExpiryMonth: 4, ExpiryYear: 2035, Cvv: "012"}
 }
 
+func TestCardServiceUsesInjectedLoggerForUnavailableToken(t *testing.T) {
+	var output bytes.Buffer
+	logger := logging.NewConsole(&output)
+	service := NewCardTokenService(repository.NewCardsRepository(time.Now), time.Now, logger)
+	ctx := context.WithValue(context.Background(), requestcontext.RequestIDKey{}, "request")
+	card, err := service.TryConsume(ctx, "merchant", "private-token")
+	require.NoError(t, err)
+	assert.Nil(t, card)
+	var record map[string]interface{}
+	require.NoError(t, json.Unmarshal(output.Bytes(), &record))
+	assert.Equal(t, "INFO", record["level"])
+	assert.Equal(t, "request", record["request_id"])
+	assert.Equal(t, "merchant", record["merchant_id"])
+	assert.NotContains(t, record, "payment_intent_id")
+	assert.NotContains(t, record, "bank_transaction_id")
+	assert.NotContains(t, output.String(), "private-token")
+}
+
 func cardService(t *testing.T) (*CardTokenService, *repository.CardsRepository, *atomic.Int64) {
 	t.Helper()
 	clock := &atomic.Int64{}
 	clock.Store(time.Date(2030, 4, 10, 12, 0, 0, 0, time.UTC).UnixNano())
 	now := func() time.Time { return time.Unix(0, clock.Load()).UTC() }
 	repo := repository.NewCardsRepository(now)
-	return NewCardTokenService(repo, now), repo, clock
+	return NewCardTokenService(repo, now, slog.Default()), repo, clock
 }
 
 func TestCardTokenIssueStoresOnlyHashWithExactLifetime(t *testing.T) {
@@ -100,7 +123,7 @@ func TestCardTokenWrongMerchantAndUnknownTokenDoNotConsumeOrExtend(t *testing.T)
 
 func TestCardTokenConcurrentConsumersAcrossServices(t *testing.T) {
 	service, repo, _ := cardService(t)
-	other := NewCardTokenService(repo, service.now)
+	other := NewCardTokenService(repo, service.now, slog.Default())
 	token, err := service.Issue(context.Background(), "merchant", validCard())
 	require.NoError(t, err)
 	var successes atomic.Int32

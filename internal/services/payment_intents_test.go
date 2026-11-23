@@ -1,11 +1,13 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,10 +17,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/changedatacapture"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/integrations/banksimulator"
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/logging"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/middleware"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/models"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/repository"
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/requestcontext"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,6 +36,99 @@ const (
 type paymentBank struct {
 	calls atomic.Int32
 	send  func(context.Context, banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error)
+}
+
+type observedLookupRepository struct {
+	PaymentIntentsRepository
+	calls int
+}
+
+func (r *observedLookupRepository) GetPaymentIntent(merchantID, intentID string) (*models.PaymentIntent, error) {
+	r.calls++
+	return r.PaymentIntentsRepository.GetPaymentIntent(merchantID, intentID)
+}
+
+func TestGetPaymentIntentRejectsCanceledContextBeforeLookup(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		t.Run(fmt.Sprintf("expired=%t", expired), func(t *testing.T) {
+			f := newPaymentFixture(t, nil)
+			intent := f.create(t, "merchant", "create")
+			repo := &observedLookupRepository{PaymentIntentsRepository: f.repo}
+			f.service.repository = repo
+			ctx, cancel := context.WithCancel(context.Background())
+			expected := context.Canceled
+			cancel()
+			if expired {
+				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				defer cancel()
+				expected = context.DeadlineExceeded
+			}
+			result, err := f.service.GetPaymentIntent(ctx, "merchant", intent.PaymentIntentID)
+			assert.ErrorIs(t, err, expected)
+			assert.Nil(t, result)
+			assert.Zero(t, repo.calls)
+		})
+	}
+}
+
+func TestConfirmationPropagatesContextToFinalLookupAfterRecordingOutcome(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := newPaymentFixture(t, func(context.Context, banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
+		cancel()
+		code := "bank-code"
+		return banksimulator.BankAuthorizationResponse{Authorized: true, AuthorizationCode: &code}, nil
+	})
+	intent := f.create(t, "merchant", "create")
+	token := f.token(t, "merchant", validCard())
+	result, err := f.service.ConfirmPaymentIntent(middleware.WithRequestID(ctx, paymentRequestID),
+		"merchant", intent.PaymentIntentID, "confirm", models.ConfirmPaymentIntentRequest{CardToken: token})
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, result)
+	current, err := f.service.GetPaymentIntent(context.Background(), "merchant", intent.PaymentIntentID)
+	require.NoError(t, err)
+	assert.Equal(t, models.PaymentIntentAuthorized, current.Status)
+	require.Len(t, current.BankTransactions, 1)
+	assert.Equal(t, models.BankTransactionAuthorized, current.BankTransactions[0].Status)
+	assert.EqualValues(t, 1, f.bank.calls.Load())
+}
+
+func TestPaymentServiceUsesInjectedLoggerAndAttemptContext(t *testing.T) {
+	var output bytes.Buffer
+	logger := logging.NewConsole(&output)
+	f := newPaymentFixture(t, func(ctx context.Context, _ banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
+		assert.Equal(t, "merchant", ctx.Value(requestcontext.MerchantIDKey{}))
+		assert.NotEmpty(t, ctx.Value(requestcontext.BankTransactionIDKey{}))
+		return banksimulator.BankAuthorizationResponse{}, &banksimulator.Failure{Kind: banksimulator.TimeoutFailure}
+	})
+	var err error
+	f.service, err = NewPaymentIntentsService(f.repo, f.bank, f.cards, f.cards.now, logger)
+	require.NoError(t, err)
+	intent := f.create(t, "merchant", "create")
+	token := f.token(t, "merchant", validCard())
+	ctx := middleware.WithRequestID(context.Background(), paymentRequestID)
+	pending, err := f.service.ConfirmPaymentIntent(ctx, "merchant", intent.PaymentIntentID, "confirm",
+		models.ConfirmPaymentIntentRequest{CardToken: token})
+	require.NoError(t, err)
+	require.Len(t, pending.BankTransactions, 1)
+	assert.Nil(t, ctx.Value(requestcontext.BankTransactionIDKey{}), "service enrichment must not mutate caller context")
+	var record map[string]interface{}
+	require.NoError(t, json.Unmarshal(output.Bytes(), &record))
+	assert.Equal(t, "INFO", record["level"])
+	assert.Equal(t, "payment intent requires verification after bank failure", record["message"])
+	assert.Equal(t, paymentRequestID, record["request_id"])
+	assert.Equal(t, "merchant", record["merchant_id"])
+	assert.Equal(t, intent.PaymentIntentID, record["payment_intent_id"])
+	assert.Equal(t, pending.BankTransactions[0].BankTransactionID, record["bank_transaction_id"])
+	assert.Equal(t, "RequestTimeout", record["bank_transaction_status"])
+	assert.NotContains(t, output.String(), token)
+	assert.NotContains(t, output.String(), validCard().CardNumber)
+	output.Reset()
+	_, err = f.service.ConfirmPaymentIntent(ctx, "merchant", intent.PaymentIntentID, "confirm",
+		models.ConfirmPaymentIntentRequest{CardToken: token})
+	require.NoError(t, err)
+	assert.Empty(t, output.String(), "a replay must not emit another bank failure")
+	assert.EqualValues(t, 1, f.bank.calls.Load())
 }
 
 func (b *paymentBank) ProcessBankTransaction(ctx context.Context, request banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
@@ -70,9 +168,9 @@ func newPaymentFixture(t *testing.T, send func(context.Context, banksimulator.Ba
 	}
 	bank := &paymentBank{send: send}
 	events := &paymentEvents{}
-	repo, err := repository.NewPaymentIntentsRepository(events, cards.now)
+	repo, err := repository.NewPaymentIntentsRepository(events, changedatacapture.NewInMemory[models.PaymentIntentChangeEvent](), cards.now)
 	require.NoError(t, err)
-	service, err := NewPaymentIntentsService(repo, bank, cards, cards.now)
+	service, err := NewPaymentIntentsService(repo, bank, cards, cards.now, slog.Default())
 	require.NoError(t, err)
 	return &paymentFixture{service: service, repo: repo, cards: cards, bank: bank, clock: clock, events: events}
 }
@@ -131,7 +229,7 @@ func TestPaymentIntentConfirmationUsesStoredDetailsAndReplaysAfterTokenExpiry(t 
 			require.NoError(t, err)
 			assert.Equal(t, confirmed, replay)
 			assert.EqualValues(t, 1, f.bank.calls.Load())
-			current, err := f.service.GetPaymentIntent("merchant", intent.PaymentIntentID)
+			current, err := f.service.GetPaymentIntent(context.Background(), "merchant", intent.PaymentIntentID)
 			require.NoError(t, err)
 			assert.Equal(t, confirmed, current)
 			assert.Equal(t, current, f.create(t, "merchant", "private-create"))
@@ -148,8 +246,8 @@ func TestPaymentIntentConfirmationUsesStoredDetailsAndReplaysAfterTokenExpiry(t 
 			require.NoError(t, err)
 			var fields map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(body, &fields))
-			assert.Len(t, fields, 6)
-			for _, key := range []string{"payment_intent_id", "status", "currency", "amount", "bank_transactions", "request_id"} {
+			assert.Len(t, fields, 8)
+			for _, key := range []string{"payment_intent_id", "status", "currency", "amount", "bank_transactions", "request_id", "created_at", "updated_at"} {
 				assert.Contains(t, fields, key)
 			}
 			require.Len(t, f.events.events, 2)
@@ -158,7 +256,7 @@ func TestPaymentIntentConfirmationUsesStoredDetailsAndReplaysAfterTokenExpiry(t 
 				assert.Equal(t, confirmed.BankTransactions[0].BankTransactionID, event.BankTransactionID)
 			}
 			for _, lookup := range []struct{ merchant, id string }{{"other", intent.PaymentIntentID}, {"merchant", "missing"}} {
-				missing, err := f.service.GetPaymentIntent(lookup.merchant, lookup.id)
+				missing, err := f.service.GetPaymentIntent(context.Background(), lookup.merchant, lookup.id)
 				require.NoError(t, err)
 				assert.Nil(t, missing)
 			}
@@ -184,7 +282,7 @@ func TestPaymentIntentDeclinedRetryAndOldAttemptReplay(t *testing.T) {
 	assert.ErrorIs(t, err, models.ErrIdempotencyConflict)
 	_, err = f.confirm("merchant", intent.PaymentIntentID, "second", firstToken)
 	assert.ErrorIs(t, err, models.ErrInvalidCardToken)
-	current, err := f.service.GetPaymentIntent("merchant", intent.PaymentIntentID)
+	current, err := f.service.GetPaymentIntent(context.Background(), "merchant", intent.PaymentIntentID)
 	require.NoError(t, err)
 	assert.Equal(t, models.PaymentIntentDeclined, current.Status)
 	f.clock.Add(int64(time.Minute))
@@ -197,7 +295,7 @@ func TestPaymentIntentDeclinedRetryAndOldAttemptReplay(t *testing.T) {
 	assert.Equal(t, second, replay)
 	assert.Equal(t, models.PaymentIntentDeclined, first.Status)
 	assert.Len(t, first.BankTransactions, 1)
-	current, err = f.service.GetPaymentIntent("merchant", intent.PaymentIntentID)
+	current, err = f.service.GetPaymentIntent(context.Background(), "merchant", intent.PaymentIntentID)
 	require.NoError(t, err)
 	assert.Equal(t, models.PaymentIntentAuthorized, current.Status)
 	require.Len(t, current.BankTransactions, 2)
@@ -257,7 +355,7 @@ func TestPaymentIntentInvalidOrForeignTokensLeaveKeyAvailable(t *testing.T) {
 			}
 			_, err := f.confirm("merchant", intent.PaymentIntentID, "pay", token)
 			assert.ErrorIs(t, err, models.ErrInvalidCardToken)
-			current, err := f.service.GetPaymentIntent("merchant", intent.PaymentIntentID)
+			current, err := f.service.GetPaymentIntent(context.Background(), "merchant", intent.PaymentIntentID)
 			require.NoError(t, err)
 			assert.Equal(t, models.PaymentIntentCreated, current.Status)
 			assert.Empty(t, current.BankTransactions)
@@ -314,7 +412,7 @@ func TestPaymentIntentConcurrentConfirmationsDoNotHoldRepositoryLockDuringBankIO
 	case <-ctx.Done():
 		t.Fatal("bank call did not start")
 	}
-	otherService, err := NewPaymentIntentsService(f.repo, f.bank, f.cards, f.cards.now)
+	otherService, err := NewPaymentIntentsService(f.repo, f.bank, f.cards, f.cards.now, slog.Default())
 	require.NoError(t, err)
 	replay, err := otherService.ConfirmPaymentIntent(middleware.WithRequestID(ctx, paymentRetryRequestID), "merchant", intent.PaymentIntentID, "pay",
 		models.ConfirmPaymentIntentRequest{CardToken: token})
@@ -386,7 +484,7 @@ func TestPaymentIntentBankFailuresRecordCauseAndPreventResubmission(t *testing.T
 			assert.Equal(t, result, replay)
 			_, err = f.confirm("merchant", intent.PaymentIntentID, "another", f.token(t, "merchant", validCard()))
 			assert.ErrorIs(t, err, models.ErrIntentNotPayable)
-			current, err := f.service.GetPaymentIntent("merchant", intent.PaymentIntentID)
+			current, err := f.service.GetPaymentIntent(context.Background(), "merchant", intent.PaymentIntentID)
 			require.NoError(t, err)
 			assert.Equal(t, result, current)
 			assert.NotNil(t, current.BankTransactions[0].CompletedAt)
@@ -414,7 +512,7 @@ func TestPaymentIntentInvalidDecisionAndUnexpectedBankError(t *testing.T) {
 	intent := f.create(t, "merchant", "create")
 	_, err := f.confirm("merchant", intent.PaymentIntentID, "pay", f.token(t, "merchant", validCard()))
 	assert.ErrorIs(t, err, failure)
-	current, err := f.service.GetPaymentIntent("merchant", intent.PaymentIntentID)
+	current, err := f.service.GetPaymentIntent(context.Background(), "merchant", intent.PaymentIntentID)
 	require.NoError(t, err)
 	assert.Equal(t, models.BankTransactionScheduled, current.BankTransactions[0].Status)
 	assert.Nil(t, current.BankTransactions[0].CompletedAt)
@@ -491,7 +589,7 @@ func TestPaymentIntentLateBankFailureRefinesTimeoutWithoutNewAttempt(t *testing.
 	case <-ctx.Done():
 		t.Fatal("bank call did not start")
 	}
-	current, err := f.service.GetPaymentIntent("merchant", intent.PaymentIntentID)
+	current, err := f.service.GetPaymentIntent(ctx, "merchant", intent.PaymentIntentID)
 	require.NoError(t, err)
 	transaction := current.BankTransactions[0]
 	f.clock.Add(int64(30 * time.Second))
@@ -537,8 +635,9 @@ func TestPaymentIntentUsesHTTPBankClientAndReplaysWithoutResubmitting(t *testing
 			defer server.Close()
 			client, err := banksimulator.NewClient(server.URL+"/", time.Second)
 			require.NoError(t, err)
+			t.Cleanup(client.CloseIdleConnections)
 			f := newPaymentFixture(t, nil)
-			f.service, err = NewPaymentIntentsService(f.repo, client, f.cards, f.cards.now)
+			f.service, err = NewPaymentIntentsService(f.repo, client, f.cards, f.cards.now, slog.Default())
 			require.NoError(t, err)
 			intent := f.create(t, "merchant", "create")
 			token := f.token(t, "merchant", validCard())

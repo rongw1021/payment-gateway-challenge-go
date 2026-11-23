@@ -24,27 +24,32 @@ type BankTransactionChangeProducer interface {
 	Produce(models.BankTransactionChangeEvent) error
 }
 
-type PaymentIntentsRepository struct {
-	mu               sync.Mutex
-	paymentIntents   []models.PaymentIntent
-	bankTransactions []models.BankTransaction
-	fingerprintKey   [32]byte
-	changes          BankTransactionChangeProducer
-	now              func() time.Time
+type PaymentIntentChangeProducer interface {
+	Produce(models.PaymentIntentChangeEvent) error
 }
 
-func NewPaymentIntentsRepository(changes BankTransactionChangeProducer, now func() time.Time) (*PaymentIntentsRepository, error) {
-	if changes == nil || now == nil {
-		return nil, errors.New("change producer and clock are required")
+type PaymentIntentsRepository struct {
+	mu                    sync.Mutex
+	paymentIntents        []models.PaymentIntent
+	bankTransactions      []models.BankTransaction
+	fingerprintKey        [32]byte
+	bankTransactionChange BankTransactionChangeProducer
+	paymentIntentChange   PaymentIntentChangeProducer
+	now                   func() time.Time
+}
+
+func NewPaymentIntentsRepository(bankTransactionChange BankTransactionChangeProducer, paymentIntentChange PaymentIntentChangeProducer, now func() time.Time) (*PaymentIntentsRepository, error) {
+	if bankTransactionChange == nil || paymentIntentChange == nil || now == nil {
+		return nil, errors.New("bank transaction and payment intent change producers and clock are required")
 	}
-	r := &PaymentIntentsRepository{changes: changes, now: now}
+	r := &PaymentIntentsRepository{bankTransactionChange: bankTransactionChange, paymentIntentChange: paymentIntentChange, now: now}
 	if _, err := rand.Read(r.fingerprintKey[:]); err != nil {
 		return nil, fmt.Errorf("generate payment request fingerprint key: %w", err)
 	}
 	return r, nil
 }
 
-func (r *PaymentIntentsRepository) CreatePaymentIntent(merchantID, idempotencyKey string, request models.CreatePaymentIntentRequest) (models.PaymentIntent, bool, error) {
+func (r *PaymentIntentsRepository) CreatePaymentIntent(merchantID, idempotencyKey, requestID string, request models.CreatePaymentIntentRequest) (models.PaymentIntent, bool, error) {
 	fingerprint, err := r.fingerprint(request)
 	if err != nil {
 		return models.PaymentIntent{}, false, err
@@ -61,12 +66,17 @@ func (r *PaymentIntentsRepository) CreatePaymentIntent(merchantID, idempotencyKe
 	if err != nil {
 		return models.PaymentIntent{}, false, err
 	}
+	now := r.now().UTC()
 	intent := models.PaymentIntent{
 		PaymentIntentID: id, MerchantID: merchantID, Status: models.PaymentIntentCreated,
 		Currency: request.Currency, Amount: *request.Amount,
 		IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint,
+		CreatedAt: now, UpdatedAt: now,
 	}
 	r.paymentIntents = append(r.paymentIntents, intent)
+	if err := r.publishIntentChange(models.PaymentIntent{}, intent, requestID); err != nil {
+		return models.PaymentIntent{}, false, err
+	}
 	return r.withBankTransactions(intent), false, nil
 }
 
@@ -92,6 +102,7 @@ func (r *PaymentIntentsRepository) CreateBankTransaction(
 		return nil, nil, nil, models.ErrPaymentIntentNotFound
 	}
 	intent := r.paymentIntents[index]
+	originalIntent := intent
 	intentSnapshot := r.withBankTransactions(intent)
 	for _, transaction := range r.bankTransactions {
 		if transaction.MerchantID == merchantID && transaction.IdempotencyKey == idempotencyKey {
@@ -126,12 +137,13 @@ func (r *PaymentIntentsRepository) CreateBankTransaction(
 	}
 	r.bankTransactions = append(r.bankTransactions, transaction)
 	intent.Status = models.PaymentIntentProcessing
+	intent.UpdatedAt = transaction.CreatedAt
 	r.paymentIntents[index] = intent
 	snapshot := cloneBankTransaction(transaction)
 	change := transactionChange(transaction, models.BankTransactionCreated)
 	change.BankTransaction = &snapshot
-	if err := r.changes.Produce(change); err != nil {
-		return nil, nil, nil, fmt.Errorf("bank transaction committed but change publication failed: %w", err)
+	if err := r.publishChanges(change, originalIntent, intent, originatingRequestID); err != nil {
+		return nil, nil, nil, err
 	}
 	intentSnapshot = r.withBankTransactions(intent)
 	transactionSnapshot := cloneBankTransaction(transaction)
@@ -198,14 +210,71 @@ func (r *PaymentIntentsRepository) completeBankTransactionLocked(merchantID, tra
 			change.Changes = append(change.Changes, models.BankTransactionFieldChange{FieldName: field.name, OriginalValue: before, NewValue: after})
 		}
 	}
+	originalIntent := r.paymentIntents[intentIndex]
+	intent := originalIntent
+	if intent.Status != intentStatus {
+		intent.Status = intentStatus
+		intent.UpdatedAt = now
+	}
 	r.bankTransactions[index] = completed
-	r.paymentIntents[intentIndex].Status = intentStatus
-	if err := r.changes.Produce(change); err != nil {
-		return models.BankTransaction{}, fmt.Errorf("bank transaction committed but change publication failed: %w", err)
+	r.paymentIntents[intentIndex] = intent
+	if err := r.publishChanges(change, originalIntent, intent, completed.OriginatingRequestID); err != nil {
+		return models.BankTransaction{}, err
 	}
 	return cloneBankTransaction(completed), nil
 }
 
+func (r *PaymentIntentsRepository) publishChanges(bankChange models.BankTransactionChangeEvent, before, after models.PaymentIntent, requestID string) error {
+	var bankErr error
+	if err := r.bankTransactionChange.Produce(bankChange); err != nil {
+		bankErr = fmt.Errorf("bank transaction committed but change publication failed: %w", err)
+	}
+	// Each stream is independent: attempt both publications even if one fails.
+	return errors.Join(bankErr, r.publishIntentChange(before, after, requestID))
+}
+
+func (r *PaymentIntentsRepository) publishIntentChange(before, after models.PaymentIntent, requestID string) error {
+	if before.PaymentIntentID != "" && before.Status == after.Status {
+		return nil
+	}
+	event := models.PaymentIntentChangeEvent{
+		RequestID: requestID, MerchantID: after.MerchantID, PaymentIntentID: after.PaymentIntentID,
+		EventType: models.PaymentIntentCreatedEvent,
+	}
+	if before.PaymentIntentID == "" {
+		event.PaymentIntent = &models.PaymentIntentSnapshot{
+			Status: after.Status, Currency: after.Currency, Amount: after.Amount,
+			CreatedAt: after.CreatedAt, UpdatedAt: after.UpdatedAt,
+		}
+	} else {
+		event.EventType = models.PaymentIntentUpdatedEvent
+		for _, field := range []struct {
+			name          string
+			before, after any
+		}{
+			{"Status", before.Status, after.Status},
+			{"UpdatedAt", before.UpdatedAt, after.UpdatedAt},
+		} {
+			original, err := json.Marshal(field.before)
+			if err != nil {
+				return fmt.Errorf("encode original payment intent change: %w", err)
+			}
+			current, err := json.Marshal(field.after)
+			if err != nil {
+				return fmt.Errorf("encode new payment intent change: %w", err)
+			}
+			if !bytes.Equal(original, current) {
+				event.Changes = append(event.Changes, models.PaymentIntentFieldChange{
+					FieldName: field.name, OriginalValue: original, NewValue: current,
+				})
+			}
+		}
+	}
+	if err := r.paymentIntentChange.Produce(event); err != nil {
+		return fmt.Errorf("payment intent committed but change publication failed: %w", err)
+	}
+	return nil
+}
 func (r *PaymentIntentsRepository) GetTimedOutBankTransactions(cutoff time.Time, batchSize int) ([]models.BankTransaction, error) {
 	if batchSize <= 0 {
 		return nil, errors.New("batch size must be positive")

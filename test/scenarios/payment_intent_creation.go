@@ -89,6 +89,8 @@ func (c *client) paymentIntentCreation(t *testing.T) {
 		assert.Equal(t, first.string(t, "payment_intent_id"), replay.string(t, "payment_intent_id"))
 		assert.Equal(t, first.headers.Get("Location"), replay.headers.Get("Location"))
 		assert.NotEqual(t, first.string(t, "request_id"), replay.string(t, "request_id"))
+		assert.Equal(t, first.string(t, "created_at"), replay.string(t, "created_at"))
+		assert.Equal(t, first.string(t, "updated_at"), replay.string(t, "updated_at"))
 		assert.Empty(t, replay.transactions(t))
 	})
 	for _, test := range []struct {
@@ -117,6 +119,8 @@ func (c *client) paymentIntentCreation(t *testing.T) {
 			assert.Equal(t, outcome.intent, replay.string(t, "status"))
 			assert.Equal(t, first.headers.Get("Location"), replay.headers.Get("Location"))
 			assert.JSONEq(t, string(current.body["bank_transactions"]), string(replay.body["bank_transactions"]))
+			assert.Equal(t, first.string(t, "created_at"), replay.string(t, "created_at"))
+			assert.Equal(t, current.string(t, "updated_at"), replay.string(t, "updated_at"))
 		})
 	}
 	runCase(t, "MerchantScopedKey", "Different merchants may use the same creation key independently.", func(t *testing.T) {

@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"time"
 
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/identifiers"
 )
@@ -58,14 +59,17 @@ func (ConfirmPaymentIntentRequest) String() string   { return "ConfirmPaymentInt
 func (ConfirmPaymentIntentRequest) GoString() string { return "ConfirmPaymentIntentRequest" }
 
 type PaymentIntent struct {
-	PaymentIntentID    string              `json:"payment_intent_id" format:"uuid"`
-	MerchantID         string              `json:"merchant_id"`
-	Status             PaymentIntentStatus `json:"status"`
-	Currency           string              `json:"currency"`
-	Amount             int32               `json:"amount"`
-	IdempotencyKey     string              `json:"-"`
-	RequestFingerprint string              `json:"-"`
-	BankTransactions   []BankTransaction   `json:"bank_transactions"`
+	PaymentIntentID string              `json:"payment_intent_id" format:"uuid"`
+	MerchantID      string              `json:"merchant_id"`
+	Status          PaymentIntentStatus `json:"status"`
+	Currency        string              `json:"currency"`
+	Amount          int32               `json:"amount"`
+	CreatedAt       time.Time           `json:"created_at"`
+	// UpdatedAt changes only on intent status transitions, not reads or replays.
+	UpdatedAt          time.Time         `json:"updated_at"`
+	IdempotencyKey     string            `json:"-"`
+	RequestFingerprint string            `json:"-"`
+	BankTransactions   []BankTransaction `json:"bank_transactions"`
 }
 
 func (p PaymentIntent) String() string {
@@ -78,6 +82,9 @@ type PaymentIntentResponse struct {
 	Status          PaymentIntentStatus `json:"status" binding:"required"`
 	Currency        string              `json:"currency" binding:"required" enums:"GBP,USD,EUR" example:"GBP"`
 	Amount          int32               `json:"amount" binding:"required" format:"int32" minimum:"1" maximum:"2147483647" example:"100"`
+	CreatedAt       time.Time           `json:"created_at" binding:"required" format:"date-time"`
+	// UTC time of the most recent intent status change; initially equal to created_at.
+	UpdatedAt time.Time `json:"updated_at" binding:"required" format:"date-time"`
 	// Complete history, oldest first; empty rather than null before the first attempt.
 	BankTransactions []BankTransactionResponse `json:"bank_transactions" binding:"required"`
 	RequestID        *string                   `json:"request_id" binding:"required" format:"uuid"`

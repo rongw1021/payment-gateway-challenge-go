@@ -5,12 +5,13 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/identifiers"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/models"
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/requestcontext"
 )
 
 type CardsRepository interface {
@@ -21,10 +22,11 @@ type CardsRepository interface {
 type CardTokenService struct {
 	repository CardsRepository
 	now        func() time.Time
+	logger     *slog.Logger
 }
 
-func NewCardTokenService(repository CardsRepository, now func() time.Time) *CardTokenService {
-	return &CardTokenService{repository: repository, now: now}
+func NewCardTokenService(repository CardsRepository, now func() time.Time, logger *slog.Logger) *CardTokenService {
+	return &CardTokenService{repository: repository, now: now, logger: logger}
 }
 
 type ValidationError struct {
@@ -73,7 +75,8 @@ func (s *CardTokenService) TryConsume(ctx context.Context, merchantID, token str
 		return nil, fmt.Errorf("consume card token: %w", err)
 	}
 	if card == nil {
-		log.Print("Card token consumption rejected: token is unavailable or expired.")
+		ctx = context.WithValue(ctx, requestcontext.MerchantIDKey{}, merchantID)
+		s.logger.InfoContext(ctx, "card token consumption rejected: token is unavailable or expired")
 	}
 	return card, nil
 }

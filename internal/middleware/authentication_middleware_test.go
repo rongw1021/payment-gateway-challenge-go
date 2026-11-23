@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -36,7 +37,7 @@ func TestAuthenticationMiddlewareRequiresMerchantAndRouteScope(t *testing.T) {
 				assert.NotEmpty(t, GetRequestID(r.Context()))
 				w.WriteHeader(http.StatusNoContent)
 			})
-			handler := NoStore(RequestID(auth.RequireScope(test.scope)(next)))
+			handler := NoStore(RequestID(slog.Default())(auth.RequireScope(test.scope, slog.Default())(next)))
 			req := httptest.NewRequest(http.MethodPost, "/protected", nil)
 			req = req.WithContext(context.WithValue(req.Context(), merchantKey{}, "untrusted-merchant"))
 			req.Header.Set("Authorization", test.authorization)

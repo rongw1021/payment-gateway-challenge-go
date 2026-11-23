@@ -1,18 +1,22 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/logging"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/middleware"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/models"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/repository"
@@ -33,7 +37,7 @@ func cardTokenHandler(t *testing.T) (*CardTokensHandler, *services.CardTokenServ
 	t.Helper()
 	now := func() time.Time { return time.Date(2030, 4, 10, 12, 0, 0, 0, time.UTC) }
 	repo := repository.NewCardsRepository(now)
-	service := services.NewCardTokenService(repo, now)
+	service := services.NewCardTokenService(repo, now, slog.Default())
 	var credentials []middleware.APIKeyCredential
 	for payload, scopes := range map[string][]string{
 		"cards": {middleware.CardTokensCreate}, "read": {"payment-intents:read"},
@@ -46,9 +50,9 @@ func cardTokenHandler(t *testing.T) (*CardTokensHandler, *services.CardTokenServ
 	}
 	auth, err := middleware.NewAuthenticator(credentials)
 	require.NoError(t, err)
-	handler := NewCardTokensHandler(service)
-	endpoint := middleware.NoStore(middleware.RequestID(
-		auth.RequireScope(middleware.CardTokensCreate)(handler.PostHandler()),
+	handler := NewCardTokensHandler(service, slog.Default())
+	endpoint := middleware.NoStore(middleware.RequestID(slog.Default())(
+		auth.RequireScope(middleware.CardTokensCreate, slog.Default())(handler.PostHandler()),
 	))
 	return handler, service, endpoint
 }
@@ -262,6 +266,19 @@ func TestCardTokenHandlerTraceEndsOnPanic(t *testing.T) {
 	assert.Equal(t, response.Header().Get("X-Request-Id"), attributes["request_id"])
 	assert.False(t, span.EndTime().Before(span.StartTime()))
 	assert.NotContains(t, fmt.Sprint(attributes, span.Events(), span.Status()), panicValue)
+
+	logger := logging.NewConsole(&bytes.Buffer{})
+	recoveredEndpoint := middleware.Recover(logger)(endpoint)
+	recovered := httptest.NewRecorder()
+	retried := httptest.NewRequest(http.MethodPost, "/api/CardTokens", strings.NewReader(cardTokenBody))
+	retried.Header = request.Header.Clone()
+	require.NotPanics(t, func() { recoveredEndpoint.ServeHTTP(recovered, retried) })
+	assert.Equal(t, http.StatusInternalServerError, recovered.Code)
+	spans = recorder.Ended()
+	require.Len(t, spans, 2)
+	assert.Equal(t, codes.Error, spans[1].Status().Code)
+	assert.Equal(t, "POST /api/CardTokens", spans[1].Name())
+	assert.NotContains(t, recovered.Body.String(), panicValue)
 }
 
 type failingCardTokenIssuer struct{}
@@ -271,7 +288,9 @@ func (failingCardTokenIssuer) Issue(context.Context, string, models.CreateCardTo
 }
 
 func TestCardTokenHandlerHidesInternalFailure(t *testing.T) {
+	var output bytes.Buffer
 	handler, _, endpoint := cardTokenHandler(t)
+	handler.logger = logging.NewConsole(&output)
 	handler.service = failingCardTokenIssuer{}
 	req := httptest.NewRequest(http.MethodPost, "/api/CardTokens", strings.NewReader(cardTokenBody))
 	req.Header.Set("Authorization", "Bearer sk_cards")
@@ -282,4 +301,81 @@ func TestCardTokenHandlerHidesInternalFailure(t *testing.T) {
 	assert.Equal(t, "application/problem+json", w.Header().Get("Content-Type"))
 	assert.NotContains(t, w.Body.String(), "storage")
 	assert.NotContains(t, w.Body.String(), "token")
+	var record map[string]interface{}
+	require.NoError(t, json.Unmarshal(output.Bytes(), &record))
+	assert.Equal(t, "ERROR", record["level"])
+	assert.Equal(t, "failed to issue card token", record["message"])
+	assert.Equal(t, "internal storage failure", record["error"])
+	assert.Equal(t, w.Header().Get("X-Request-Id"), record["request_id"])
+	assert.Equal(t, "merchant", record["merchant_id"])
+	for _, field := range []string{"idempotency_key", "payment_intent_id", "bank_transaction_id"} {
+		assert.NotContains(t, record, field)
+	}
+	assert.NotContains(t, output.String(), "sk_cards")
+	assert.NotContains(t, output.String(), "0222405343240007")
+}
+
+type unwritableResponse struct {
+	header   http.Header
+	statuses []int
+	writes   int
+}
+
+func (w *unwritableResponse) Header() http.Header    { return w.header }
+func (w *unwritableResponse) WriteHeader(status int) { w.statuses = append(w.statuses, status) }
+func (w *unwritableResponse) Write([]byte) (int, error) {
+	w.writes++
+	return 0, io.ErrClosedPipe
+}
+
+func TestCardHandlerLogsResponseWriteErrorsOnlyWhenPresent(t *testing.T) {
+	for _, test := range []struct {
+		name, body, contentType string
+		status                  int
+		callsService            bool
+	}{
+		{"success", cardTokenBody, "application/json", 200, true},
+		{"malformed body", "{", "application/json", 400, false},
+		{"invalid fields", "{}", "application/json", 400, false},
+		{"wrong media type", cardTokenBody, "text/plain", 415, false},
+		{"oversized body", cardTokenBody + strings.Repeat(" ", 1<<20), "application/json", 413, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, broken := range []bool{false, true} {
+				var logs bytes.Buffer
+				handler, _, endpoint := cardTokenHandler(t)
+				handler.logger = logging.NewConsole(&logs)
+				called := false
+				issuer := handler.service
+				handler.service = cardTokenIssuerFunc(func(ctx context.Context, merchant string, request models.CreateCardTokenRequest) (*models.CardTokenResponse, error) {
+					called = true
+					return issuer.Issue(ctx, merchant, request)
+				})
+				request := httptest.NewRequest(http.MethodPost, "/api/CardTokens", strings.NewReader(test.body))
+				request.Header.Set("Authorization", "Bearer sk_cards")
+				request.Header.Set("Content-Type", test.contentType)
+				if broken {
+					response := &unwritableResponse{header: make(http.Header)}
+					endpoint.ServeHTTP(response, request)
+					assert.Equal(t, []int{test.status}, response.statuses)
+					assert.Equal(t, 1, response.writes)
+					var record map[string]interface{}
+					require.NoError(t, json.Unmarshal(logs.Bytes(), &record), "exactly one error log should be written")
+					assert.Equal(t, "ERROR", record["level"])
+					assert.Equal(t, "failed to write HTTP response", record["message"])
+					assert.Equal(t, response.Header().Get("X-Request-Id"), record["request_id"])
+					assert.Equal(t, "merchant", record["merchant_id"])
+					assert.Contains(t, record["error"], io.ErrClosedPipe.Error())
+				} else {
+					response := httptest.NewRecorder()
+					endpoint.ServeHTTP(response, request)
+					assert.Equal(t, test.status, response.Code)
+					assert.Empty(t, logs.String())
+				}
+				assert.Equal(t, test.callsService, called)
+				assert.NotContains(t, logs.String(), "0222405343240007")
+				assert.NotContains(t, logs.String(), "sk_cards")
+			}
+		})
+	}
 }

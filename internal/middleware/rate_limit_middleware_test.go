@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -21,7 +22,7 @@ func TestRateLimiterAdmitsExactly100ConcurrentRequestsAcrossClientsAndRoutes(t *
 	now := time.Now()
 	limiter.now = func() time.Time { return now }
 	var called, rejected atomic.Int32
-	handler := limiter.Limit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := limiter.Limit(slog.Default())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called.Add(1)
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -83,7 +84,7 @@ func TestRateLimiterExemptsOnlyHealthCheckAndPreservesRejectionMetadata(t *testi
 	require.NoError(t, err)
 	now := time.Now()
 	limiter.now = func() time.Time { return now }
-	handler := limiter.Limit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := limiter.Limit(slog.Default())(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	for i := 0; i < 3; i++ {
@@ -130,6 +131,6 @@ func TestRateLimiterExemptsOnlyHealthCheckAndPreservesRejectionMetadata(t *testi
 func TestRateLimiterRejectsNonpositiveLimits(t *testing.T) {
 	for _, limit := range []int{0, -1} {
 		_, err := NewRateLimiter(limit)
-		require.ErrorContains(t, err, "rate_limit.requests_per_second")
+		require.ErrorContains(t, err, "rate_limit.global_requests_per_second")
 	}
 }

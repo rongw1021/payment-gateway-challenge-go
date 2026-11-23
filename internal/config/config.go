@@ -27,7 +27,8 @@ type Config struct {
 }
 
 type RateLimitConfig struct {
-	RequestsPerSecond integer32 `yaml:"requests_per_second"`
+	GlobalRequestsPerSecond      integer32 `yaml:"global_requests_per_second"`
+	PerMerchantRequestsPerSecond integer32 `yaml:"per_merchant_requests_per_second"`
 }
 
 type ServerConfig struct {
@@ -120,7 +121,7 @@ func Load() (*Config, error) {
 	decoder.KnownFields(true)
 	cfg := Config{
 		Server:    DefaultServerConfig(),
-		RateLimit: RateLimitConfig{RequestsPerSecond: 100},
+		RateLimit: RateLimitConfig{GlobalRequestsPerSecond: 100, PerMerchantRequestsPerSecond: 10},
 	}
 	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("decode configuration %s: %w", filename, err)

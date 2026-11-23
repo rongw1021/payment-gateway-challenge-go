@@ -37,7 +37,7 @@ import (
 )
 
 type observedChanges struct {
-	*changedatacapture.InMemory
+	*changedatacapture.InMemory[models.BankTransactionChangeEvent]
 	consumed chan models.BankTransactionChangeEvent
 }
 
@@ -50,6 +50,28 @@ func (c *observedChanges) Consume(ctx context.Context) (models.BankTransactionCh
 }
 
 type failingChanges struct{ err error }
+
+type failingIntentChanges struct{ err error }
+
+func (f failingIntentChanges) Produce(models.PaymentIntentChangeEvent) error {
+	return errors.New("unexpected publication")
+}
+func (f failingIntentChanges) Consume(context.Context) (models.PaymentIntentChangeEvent, error) {
+	return models.PaymentIntentChangeEvent{}, f.err
+}
+
+type observedIntentChanges struct {
+	*changedatacapture.InMemory[models.PaymentIntentChangeEvent]
+	consumed chan models.PaymentIntentChangeEvent
+}
+
+func (c *observedIntentChanges) Consume(ctx context.Context) (models.PaymentIntentChangeEvent, error) {
+	event, err := c.InMemory.Consume(ctx)
+	if err == nil {
+		c.consumed <- event
+	}
+	return event, err
+}
 
 func (f failingChanges) Produce(models.BankTransactionChangeEvent) error {
 	return errors.New("unexpected publication")
@@ -86,7 +108,7 @@ func newDeadlineTestAPI(t *testing.T, bank testBank) (*Api, *atomic.Int32) {
 	}}, testBank(func(ctx context.Context, request banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
 		bankCalls.Add(1)
 		return bank(ctx, request)
-	}), changedatacapture.NewInMemory(), testCronOptions(), 100)
+	}), changedatacapture.NewStreams(), testCronOptions(), 100, 10, slog.Default())
 	require.NoError(t, err)
 	return gateway, &bankCalls
 }
@@ -186,7 +208,7 @@ func TestHTTPReadAndIdleDeadlines(t *testing.T) {
 			assert.Equal(t, response.Header.Get("X-Request-Id"), problem.RequestID)
 			assert.Zero(t, bankCalls.Load())
 			if intentID != "" {
-				intent, err := gateway.paymentIntents.GetPaymentIntent("merchant", intentID)
+				intent, err := gateway.paymentIntents.GetPaymentIntent(context.Background(), "merchant", intentID)
 				require.NoError(t, err)
 				assert.Equal(t, models.PaymentIntentCreated, intent.Status)
 				assert.Empty(t, intent.BankTransactions)
@@ -341,7 +363,7 @@ func TestAPIRequestLoggingIncludesAuthenticationAndBindingFailures(t *testing.T)
 	api, err := New([]middleware.APIKeyCredential{{
 		MerchantID: "merchant", KeyHash: hex.EncodeToString(hash[:]),
 		Scopes: []string{middleware.CardTokensCreate, middleware.PaymentIntentsCreate},
-	}}, bank, changedatacapture.NewInMemory(), testCronOptions(), 100)
+	}}, bank, changedatacapture.NewStreams(), testCronOptions(), 100, 10, slog.Default())
 	require.NoError(t, err)
 	for _, test := range []struct {
 		name, path, authorization, idempotencyKey string
@@ -395,10 +417,10 @@ func TestAPIGlobalRateLimitRejectsBeforeAuthenticationAndRecords429(t *testing.T
 		t.Error("rate-limited requests must not call the bank")
 		return banksimulator.BankAuthorizationResponse{}, nil
 	})
-	invalid, err := New(credentials, bank, changedatacapture.NewInMemory(), testCronOptions(), 0)
-	require.ErrorContains(t, err, "rate_limit.requests_per_second")
+	invalid, err := New(credentials, bank, changedatacapture.NewStreams(), testCronOptions(), 0, 10, slog.Default())
+	require.ErrorContains(t, err, "rate_limit.global_requests_per_second")
 	assert.Nil(t, invalid)
-	api, err := New(credentials, bank, changedatacapture.NewInMemory(), testCronOptions(), 1)
+	api, err := New(credentials, bank, changedatacapture.NewStreams(), testCronOptions(), 1, 10, slog.Default())
 	require.NoError(t, err)
 	first := httptest.NewRecorder()
 	api.router.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/api/CardTokens", nil))
@@ -446,8 +468,71 @@ func TestAPIGlobalRateLimitRejectsBeforeAuthenticationAndRecords429(t *testing.T
 	assert.EqualValues(t, 2, successes, "the configured non-5xx HTTP success definition still includes 401 and 429")
 }
 
+func TestAPIMerchantRateLimitRunsAfterScopeBeforeValidation(t *testing.T) {
+	var output bytes.Buffer
+	var credentials []middleware.APIKeyCredential
+	scopes := []string{middleware.CardTokensCreate, middleware.PaymentIntentsCreate, middleware.PaymentIntentsConfirm, middleware.PaymentIntentsRead}
+	for _, key := range []struct {
+		payload, merchant string
+		scopes            []string
+	}{
+		{"a1", "a", scopes}, {"a2", "a", scopes},
+		{"read", "a", []string{middleware.PaymentIntentsRead}}, {"b", "b", scopes},
+	} {
+		hash := sha256.Sum256([]byte(key.payload))
+		credentials = append(credentials, middleware.APIKeyCredential{
+			MerchantID: key.merchant, KeyHash: hex.EncodeToString(hash[:]), Scopes: key.scopes,
+		})
+	}
+	bank := testBank(func(context.Context, banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
+		t.Error("rate-limited requests must not call the bank")
+		return banksimulator.BankAuthorizationResponse{}, errors.New("unexpected bank call")
+	})
+	invalid, err := New(credentials, bank, changedatacapture.NewStreams(), testCronOptions(), 100, 0, logging.NewConsole(&output))
+	require.ErrorContains(t, err, "rate_limit.per_merchant_requests_per_second")
+	assert.Nil(t, invalid)
+	api, err := New(credentials, bank, changedatacapture.NewStreams(), testCronOptions(), 100, 1, logging.NewConsole(&output))
+	require.NoError(t, err)
+	path := "/api/PaymentIntents/01234567-89ab-4cde-8123-456789abcdef"
+	send := func(method, path, key string, status int) {
+		t.Helper()
+		output.Reset()
+		request := httptest.NewRequest(method, path, strings.NewReader("invalid-json"))
+		request.Header.Set("Authorization", "Bearer sk_"+key)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		api.router.ServeHTTP(response, request)
+		require.Equal(t, status, response.Code)
+		if status == http.StatusTooManyRequests {
+			assert.Equal(t, "1", response.Header().Get("Retry-After"))
+			var record map[string]interface{}
+			require.NoError(t, json.Unmarshal(output.Bytes(), &record))
+			assert.EqualValues(t, 429, record["status_code"])
+			assert.Equal(t, response.Header().Get("X-Request-Id"), record["request_id"])
+		}
+	}
+	send(http.MethodPost, "/api/CardTokens", "unknown", 401)
+	send(http.MethodPost, "/api/CardTokens", "read", 403)
+	send(http.MethodGet, path, "a1", 404)
+	for _, route := range []struct{ method, path string }{
+		{http.MethodPost, "/api/CardTokens"},
+		{http.MethodPost, "/api/PaymentIntents"},
+		{http.MethodPost, path + "/confirm"},
+		{http.MethodGet, path},
+	} {
+		send(route.method, route.path, "a2", 429)
+	}
+	send(http.MethodPost, "/api/CardTokens", "unknown", 401)
+	send(http.MethodPost, "/api/CardTokens", "read", 403)
+	send(http.MethodGet, path, "b", 404)
+}
+
 func TestAPIBackgroundServicesRunAndStopWithServer(t *testing.T) {
-	capture := &observedChanges{InMemory: changedatacapture.NewInMemory(), consumed: make(chan models.BankTransactionChangeEvent, 8)}
+	capture := &observedChanges{InMemory: changedatacapture.NewInMemory[models.BankTransactionChangeEvent](), consumed: make(chan models.BankTransactionChangeEvent, 8)}
+	intentCapture := &observedIntentChanges{
+		InMemory: changedatacapture.NewInMemory[models.PaymentIntentChangeEvent](),
+		consumed: make(chan models.PaymentIntentChangeEvent, 8),
+	}
 	entered, release := make(chan struct{}), make(chan struct{})
 	var bankCalls atomic.Int32
 	bank := testBank(func(ctx context.Context, request banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
@@ -464,9 +549,9 @@ func TestAPIBackgroundServicesRunAndStopWithServer(t *testing.T) {
 	hash := sha256.Sum256([]byte("workers"))
 	api, err := New([]middleware.APIKeyCredential{{
 		MerchantID: "merchant", KeyHash: hex.EncodeToString(hash[:]), Scopes: []string{middleware.PaymentIntentsConfirm},
-	}}, bank, capture, backgroundservices.CronJobOptions{
+	}}, bank, changedatacapture.Streams{BankTransactions: capture, PaymentIntents: intentCapture}, backgroundservices.CronJobOptions{
 		SweepInterval: 5 * time.Millisecond, BankTransactionStatusUpdateTimeout: 30 * time.Millisecond, BatchSize: 1,
-	}, 100)
+	}, 100, 10, slog.Default())
 	require.NoError(t, err)
 	amount := int32(100)
 	intent, _, err := api.paymentIntents.CreatePaymentIntent(context.Background(), "merchant", "create",
@@ -519,10 +604,10 @@ func TestAPIBackgroundServicesRunAndStopWithServer(t *testing.T) {
 		t.Fatal("bank call did not start")
 	}
 	require.Eventually(t, func() bool {
-		current, err := api.paymentIntents.GetPaymentIntent("merchant", intent.PaymentIntentID)
+		current, err := api.paymentIntents.GetPaymentIntent(ctx, "merchant", intent.PaymentIntentID)
 		return err == nil && current.Status == models.PaymentIntentPendingVerification
 	}, 5*time.Second, time.Millisecond)
-	pending, err := api.paymentIntents.GetPaymentIntent("merchant", intent.PaymentIntentID)
+	pending, err := api.paymentIntents.GetPaymentIntent(ctx, "merchant", intent.PaymentIntentID)
 	require.NoError(t, err)
 	require.Len(t, pending.BankTransactions, 1)
 	assert.Equal(t, models.BankTransactionStatusUpdateTimeout, pending.BankTransactions[0].Status)
@@ -534,6 +619,17 @@ func TestAPIBackgroundServicesRunAndStopWithServer(t *testing.T) {
 			assert.Equal(t, intent.PaymentIntentID, event.PaymentIntentID)
 		case <-time.After(5 * time.Second):
 			t.Fatal("reconciliation did not consume the transaction event")
+		}
+	}
+	for _, eventType := range []models.PaymentIntentEventType{
+		models.PaymentIntentCreatedEvent, models.PaymentIntentUpdatedEvent, models.PaymentIntentUpdatedEvent,
+	} {
+		select {
+		case event := <-intentCapture.consumed:
+			assert.Equal(t, eventType, event.EventType)
+			assert.Equal(t, intent.PaymentIntentID, event.PaymentIntentID)
+		case <-time.After(5 * time.Second):
+			t.Fatal("audit and webhook worker did not consume the intent event")
 		}
 	}
 	close(release)
@@ -551,6 +647,13 @@ func TestAPIBackgroundServicesRunAndStopWithServer(t *testing.T) {
 	assert.Equal(t, models.PaymentIntentAuthorized, completed.Status)
 	assert.Equal(t, pending.BankTransactions[0].BankTransactionID, completed.BankTransactions[0].BankTransactionID)
 	assert.EqualValues(t, 1, bankCalls.Load())
+	select {
+	case event := <-intentCapture.consumed:
+		assert.Equal(t, models.PaymentIntentUpdatedEvent, event.EventType)
+		assert.Equal(t, intent.PaymentIntentID, event.PaymentIntentID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("audit and webhook worker did not consume the late completion event")
+	}
 	cancel()
 	select {
 	case err := <-serverDone:
@@ -568,7 +671,10 @@ func TestAPIStopsWhenBackgroundConsumerFails(t *testing.T) {
 	}}, testBank(func(context.Context, banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
 		t.Error("unexpected bank call")
 		return banksimulator.BankAuthorizationResponse{}, nil
-	}), failingChanges{failure}, testCronOptions(), 100)
+	}), changedatacapture.Streams{
+		BankTransactions: failingChanges{failure},
+		PaymentIntents:   changedatacapture.NewInMemory[models.PaymentIntentChangeEvent](),
+	}, testCronOptions(), 100, 10, slog.Default())
 	require.NoError(t, err)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -577,13 +683,82 @@ func TestAPIStopsWhenBackgroundConsumerFails(t *testing.T) {
 	assert.ErrorIs(t, api.Serve(ctx, listener, config.DefaultServerConfig()), failure)
 }
 
+func TestAPIStopsWhenIntentEventConsumerFails(t *testing.T) {
+	failure := errors.New("intent event consumer unavailable")
+	hash := sha256.Sum256([]byte("workers"))
+	streams := changedatacapture.NewStreams()
+	streams.PaymentIntents = failingIntentChanges{failure}
+	gateway, err := New([]middleware.APIKeyCredential{{
+		MerchantID: "merchant", KeyHash: hex.EncodeToString(hash[:]), Scopes: []string{},
+	}}, testBank(func(context.Context, banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
+		t.Error("unexpected bank call")
+		return banksimulator.BankAuthorizationResponse{}, nil
+	}), streams, testCronOptions(), 100, 10, slog.Default())
+	require.NoError(t, err)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	assert.ErrorIs(t, gateway.Serve(ctx, listener, config.DefaultServerConfig()), failure)
+}
+
+func TestAPIRecoversBankPanicWithoutResubmittingPayment(t *testing.T) {
+	var output bytes.Buffer
+	logger := logging.NewConsole(&output)
+	hash := sha256.Sum256([]byte("panic-test"))
+	calls := 0
+	gateway, err := New([]middleware.APIKeyCredential{{
+		MerchantID: "merchant", KeyHash: hex.EncodeToString(hash[:]),
+		Scopes: []string{middleware.PaymentIntentsConfirm},
+	}}, testBank(func(context.Context, banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
+		calls++
+		panic("private bank panic")
+	}), changedatacapture.NewStreams(), testCronOptions(), 100, 10, logger)
+	require.NoError(t, err)
+	amount := int32(100)
+	intent, _, err := gateway.paymentIntents.CreatePaymentIntent(context.Background(), "merchant", "create",
+		models.CreatePaymentIntentRequest{Currency: "GBP", Amount: &amount})
+	require.NoError(t, err)
+	token, err := gateway.cardTokens.Issue(context.Background(), "merchant",
+		models.CreateCardTokenRequest{CardNumber: "0222405343240007", ExpiryMonth: 4, ExpiryYear: 9999, Cvv: "012"})
+	require.NoError(t, err)
+	confirm := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/PaymentIntents/"+intent.PaymentIntentID+"/confirm",
+			strings.NewReader(fmt.Sprintf(`{"card_token":%q}`, token.Token)))
+		request.Header.Set("Authorization", "Bearer sk_panic-test")
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Idempotency-Key", "01234567-89ab-4cde-8123-456789abcdef")
+		response := httptest.NewRecorder()
+		require.NotPanics(t, func() { gateway.router.ServeHTTP(response, request) })
+		return response
+	}
+	response := confirm()
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	var problem models.ProblemDetails
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &problem))
+	assert.Equal(t, response.Header().Get("X-Request-Id"), problem.RequestID)
+	assert.NotContains(t, response.Body.String(), "private bank panic")
+	assert.NotContains(t, output.String(), "private bank panic")
+	assert.Contains(t, output.String(), `"status_code":500`)
+	current, err := gateway.paymentIntents.GetPaymentIntent(context.Background(), "merchant", intent.PaymentIntentID)
+	require.NoError(t, err)
+	assert.Equal(t, models.PaymentIntentProcessing, current.Status)
+	require.Len(t, current.BankTransactions, 1)
+	assert.Equal(t, models.BankTransactionScheduled, current.BankTransactions[0].Status)
+	assert.Equal(t, http.StatusConflict, confirm().Code, "replay must not resubmit the already reserved attempt")
+	assert.Equal(t, 1, calls)
+	ping := httptest.NewRecorder()
+	gateway.router.ServeHTTP(ping, httptest.NewRequest(http.MethodGet, "/ping", nil))
+	assert.Equal(t, http.StatusOK, ping.Code)
+}
+
 func TestAPIRejectsInvalidCronConfiguration(t *testing.T) {
 	hash := sha256.Sum256([]byte("workers"))
 	api, err := New([]middleware.APIKeyCredential{{
 		MerchantID: "merchant", KeyHash: hex.EncodeToString(hash[:]), Scopes: []string{},
 	}}, testBank(func(context.Context, banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
 		return banksimulator.BankAuthorizationResponse{}, nil
-	}), changedatacapture.NewInMemory(), backgroundservices.CronJobOptions{}, 100)
+	}), changedatacapture.NewStreams(), backgroundservices.CronJobOptions{}, 100, 10, slog.Default())
 	require.ErrorContains(t, err, "SweepInterval")
 	assert.Nil(t, api)
 }
@@ -596,7 +771,7 @@ func TestCardTokenRouteAndSwagger(t *testing.T) {
 	}}, testBank(func(context.Context, banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
 		t.Error("card token issuance must not call the bank")
 		return banksimulator.BankAuthorizationResponse{}, nil
-	}), changedatacapture.NewInMemory(), testCronOptions(), 100)
+	}), changedatacapture.NewStreams(), testCronOptions(), 100, 10, slog.Default())
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/CardTokens",
@@ -662,7 +837,7 @@ func TestCardTokenRouteAndSwagger(t *testing.T) {
 }
 
 func TestCardTokenAPIFailsWithoutCredentials(t *testing.T) {
-	api, err := New(nil, nil, nil, testCronOptions(), 100)
+	api, err := New(nil, nil, changedatacapture.Streams{}, testCronOptions(), 100, 10, slog.Default())
 	require.Error(t, err)
 	assert.Nil(t, api)
 }
@@ -694,7 +869,8 @@ func TestPaymentIntentAPIWorkflowUsesBankClientAndEventPublisher(t *testing.T) {
 	defer bank.Close()
 	client, err := banksimulator.NewClient(bank.URL+"/", time.Second)
 	require.NoError(t, err)
-	capture := changedatacapture.NewInMemory()
+	t.Cleanup(client.CloseIdleConnections)
+	capture := changedatacapture.NewInMemory[models.BankTransactionChangeEvent]()
 	hash := sha256.Sum256([]byte("workflow"))
 	api, err := New([]middleware.APIKeyCredential{{
 		MerchantID: "merchant", KeyHash: hex.EncodeToString(hash[:]),
@@ -702,7 +878,9 @@ func TestPaymentIntentAPIWorkflowUsesBankClientAndEventPublisher(t *testing.T) {
 			middleware.CardTokensCreate, middleware.PaymentIntentsCreate,
 			middleware.PaymentIntentsConfirm, middleware.PaymentIntentsRead,
 		},
-	}}, client, capture, testCronOptions(), 100)
+	}}, client, changedatacapture.Streams{
+		BankTransactions: capture, PaymentIntents: changedatacapture.NewInMemory[models.PaymentIntentChangeEvent](),
+	}, testCronOptions(), 100, 10, slog.Default())
 	require.NoError(t, err)
 	send := func(method, path, body string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -784,7 +962,7 @@ func TestPaymentIntentRoutesValidateKeysAfterAuthBeforeBinding(t *testing.T) {
 	api, err := New(credentials, testBank(func(context.Context, banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
 		t.Error("rejected requests must not call the bank")
 		return banksimulator.BankAuthorizationResponse{}, nil
-	}), changedatacapture.NewInMemory(), testCronOptions(), 100)
+	}), changedatacapture.NewStreams(), testCronOptions(), 100, 10, slog.Default())
 	require.NoError(t, err)
 	for _, path := range []string{
 		"/api/PaymentIntents",

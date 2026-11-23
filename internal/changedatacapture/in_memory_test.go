@@ -13,7 +13,7 @@ import (
 )
 
 func TestInMemoryConcurrentPublishersPreserveSequenceAndEvents(t *testing.T) {
-	capture := NewInMemory()
+	capture := NewInMemory[models.BankTransactionChangeEvent]()
 	var publishers sync.WaitGroup
 	for i := 0; i < 32; i++ {
 		publishers.Add(1)
@@ -40,7 +40,7 @@ func TestInMemoryConcurrentPublishersPreserveSequenceAndEvents(t *testing.T) {
 }
 
 func TestInMemoryConsumptionIsCancelableWithoutDiscardingQueuedEvents(t *testing.T) {
-	capture := NewInMemory()
+	capture := NewInMemory[models.BankTransactionChangeEvent]()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 	_, err := capture.Consume(ctx)
@@ -52,6 +52,28 @@ func TestInMemoryConsumptionIsCancelableWithoutDiscardingQueuedEvents(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, "pending", event.BankTransactionID)
 	assert.EqualValues(t, 1, event.Sequence)
+}
+
+func TestStreamsKeepEventTypesAndSequencesIndependent(t *testing.T) {
+	streams := NewStreams()
+	for sequence := int64(1); sequence <= 2; sequence++ {
+		require.NoError(t, streams.BankTransactions.Produce(models.BankTransactionChangeEvent{
+			BankTransactionID: "transaction", EventType: models.BankTransactionCreated,
+		}))
+		require.NoError(t, streams.PaymentIntents.Produce(models.PaymentIntentChangeEvent{
+			PaymentIntentID: "intent", EventType: models.PaymentIntentCreatedEvent,
+		}))
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		bank, err := streams.BankTransactions.Consume(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, "transaction", bank.BankTransactionID)
+		assert.Equal(t, sequence, bank.Sequence)
+		intent, err := streams.PaymentIntents.Consume(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, "intent", intent.PaymentIntentID)
+		assert.Equal(t, sequence, intent.Sequence)
+		cancel()
+	}
 }
 
 type waitingContext struct {
@@ -68,7 +90,7 @@ func (c waitingContext) Done() <-chan struct{} {
 }
 
 func TestInMemoryPublicationWakesConsumerAfterEachDrain(t *testing.T) {
-	capture := NewInMemory()
+	capture := NewInMemory[models.BankTransactionChangeEvent]()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	type result struct {

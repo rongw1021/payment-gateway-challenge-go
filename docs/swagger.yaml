@@ -167,6 +167,9 @@ definitions:
         items:
           $ref: '#/definitions/models.BankTransactionResponse'
         type: array
+      created_at:
+        format: date-time
+        type: string
       currency:
         enum:
         - GBP
@@ -182,13 +185,20 @@ definitions:
         type: string
       status:
         $ref: '#/definitions/models.PaymentIntentStatus'
+      updated_at:
+        description: UTC time of the most recent intent status change; initially equal
+          to created_at.
+        format: date-time
+        type: string
     required:
     - amount
     - bank_transactions
+    - created_at
     - currency
     - payment_intent_id
     - request_id
     - status
+    - updated_at
     type: object
   models.PaymentIntentStatus:
     enum:
@@ -251,6 +261,9 @@ info:
     - POST bodies must be single JSON objects no larger than **1 MiB**.
     - Success responses use `application/json`; errors use `application/problem+json`.
     - Payment endpoints return a fresh `X-Request-Id` and disable response caching.
+    - Payment intents include UTC `created_at` and `updated_at` timestamps. Reads and idempotent replays do not advance them.
+    - Payment-intent changes are audited asynchronously. Webhook delivery is a logging-only placeholder; no merchant callback is sent.
+    - Unexpected handler panics return generic **500 ProblemDetails** if no response has started; otherwise the connection or stream is aborted. A 500 is not proof of a bank decline and does not make a new payment submission safe.
 
     ### HTTP deadlines
     - Configurable server defaults: **5s** for headers, **15s** for headers and body, **30s** for response writes, and **60s** for idle keep-alive connections.
@@ -258,7 +271,9 @@ info:
     - The write deadline includes body reading and handler time. It must exceed the request-read budget plus the bank timeout; it does not cancel bank processing or prove that a payment failed.
 
     ### Rate limiting
-    - A configurable global rolling limit defaults to **100 requests per second** per process.
+    - A configurable global rolling limit defaults to **100 requests per second** per process, before authentication.
+    - A separate merchant rolling limit defaults to **10 requests per second**, shared across that merchant's API keys and protected routes, after authentication and scope checks but before request validation.
+    - Merchant-level rejections still consume global capacity. Both limits are per process, not distributed quotas.
     - `GET /ping` is exempt.
     - Excess requests return **429 Too Many Requests** with `Retry-After: 1`.
   title: Payment Gateway Challenge Go
@@ -393,7 +408,7 @@ paths:
           schema:
             $ref: '#/definitions/models.ProblemDetails'
         "429":
-          description: Global request limit exceeded
+          description: Global or merchant request limit exceeded
           headers:
             Cache-Control:
               description: no-store
@@ -582,7 +597,7 @@ paths:
           schema:
             $ref: '#/definitions/models.ProblemDetails'
         "429":
-          description: Global request limit exceeded
+          description: Global or merchant request limit exceeded
           headers:
             Cache-Control:
               description: no-store
@@ -698,7 +713,7 @@ paths:
           schema:
             $ref: '#/definitions/models.ProblemDetails'
         "429":
-          description: Global request limit exceeded
+          description: Global or merchant request limit exceeded
           headers:
             Cache-Control:
               description: no-store
@@ -933,7 +948,7 @@ paths:
           schema:
             $ref: '#/definitions/models.ProblemDetails'
         "429":
-          description: Global request limit exceeded
+          description: Global or merchant request limit exceeded
           headers:
             Cache-Control:
               description: no-store

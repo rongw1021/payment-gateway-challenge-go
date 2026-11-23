@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/changedatacapture"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/integrations/banksimulator"
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/logging"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/middleware"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/models"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/repository"
@@ -50,23 +53,28 @@ type intentHandlerFixture struct {
 	cards   *services.CardTokenService
 	bank    *handlerBank
 	clock   atomic.Int64
-	changes *changedatacapture.InMemory
+	changes *changedatacapture.InMemory[models.BankTransactionChangeEvent]
 }
 
 func newIntentHandler(t *testing.T) *intentHandlerFixture {
 	t.Helper()
-	f := &intentHandlerFixture{router: chi.NewRouter(), changes: changedatacapture.NewInMemory()}
+	return newIntentHandlerWithLogger(t, slog.Default())
+}
+
+func newIntentHandlerWithLogger(t *testing.T, logger *slog.Logger) *intentHandlerFixture {
+	t.Helper()
+	f := &intentHandlerFixture{router: chi.NewRouter(), changes: changedatacapture.NewInMemory[models.BankTransactionChangeEvent]()}
 	f.clock.Store(time.Date(2030, 4, 10, 12, 0, 0, 0, time.UTC).UnixNano())
 	now := func() time.Time { return time.Unix(0, f.clock.Load()).UTC() }
-	f.cards = services.NewCardTokenService(repository.NewCardsRepository(now), now)
+	f.cards = services.NewCardTokenService(repository.NewCardsRepository(now), now, logger)
 	f.bank = &handlerBank{process: func(context.Context, banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
 		code := "bank-code"
 		return banksimulator.BankAuthorizationResponse{Authorized: true, AuthorizationCode: &code}, nil
 	}}
 	var err error
-	f.repo, err = repository.NewPaymentIntentsRepository(f.changes, now)
+	f.repo, err = repository.NewPaymentIntentsRepository(f.changes, changedatacapture.NewInMemory[models.PaymentIntentChangeEvent](), now)
 	require.NoError(t, err)
-	service, err := services.NewPaymentIntentsService(f.repo, f.bank, f.cards, now)
+	service, err := services.NewPaymentIntentsService(f.repo, f.bank, f.cards, now, logger)
 	require.NoError(t, err)
 	full := []string{
 		middleware.CardTokensCreate, middleware.PaymentIntentsCreate,
@@ -89,12 +97,12 @@ func newIntentHandler(t *testing.T) *intentHandlerFixture {
 	}
 	auth, err := middleware.NewAuthenticator(credentials)
 	require.NoError(t, err)
-	handler := NewPaymentIntentsHandler(service)
-	routes := f.router.With(middleware.NoStore, middleware.RequestID)
-	routes.With(auth.RequireScope(middleware.PaymentIntentsCreate), middleware.RequireIdempotencyKey).Post("/api/PaymentIntents", handler.PostHandler())
-	routes.With(auth.RequireScope(middleware.PaymentIntentsConfirm), middleware.RequireIdempotencyKey).Post("/api/PaymentIntents/{paymentIntentId}/confirm", handler.ConfirmHandler())
-	routes.With(auth.RequireScope(middleware.PaymentIntentsRead)).Get("/api/PaymentIntents/{paymentIntentId}", handler.GetHandler())
-	routes.With(auth.RequireScope(middleware.CardTokensCreate)).Post("/api/CardTokens", NewCardTokensHandler(f.cards).PostHandler())
+	handler := NewPaymentIntentsHandler(service, logger)
+	routes := f.router.With(middleware.NoStore, middleware.RequestID(logger))
+	routes.With(auth.RequireScope(middleware.PaymentIntentsCreate, logger), middleware.RequireIdempotencyKey(logger)).Post("/api/PaymentIntents", handler.PostHandler())
+	routes.With(auth.RequireScope(middleware.PaymentIntentsConfirm, logger), middleware.RequireIdempotencyKey(logger)).Post("/api/PaymentIntents/{paymentIntentId}/confirm", handler.ConfirmHandler())
+	routes.With(auth.RequireScope(middleware.PaymentIntentsRead, logger)).Get("/api/PaymentIntents/{paymentIntentId}", handler.GetHandler())
+	routes.With(auth.RequireScope(middleware.CardTokensCreate, logger)).Post("/api/CardTokens", NewCardTokensHandler(f.cards, logger).PostHandler())
 	return f
 }
 
@@ -197,8 +205,8 @@ func TestPaymentIntentsHandlerWorkflowAndReplayContract(t *testing.T) {
 			assert.NotNil(t, confirmed.BankTransactions[0].CompletedAt)
 			var shape map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &shape))
-			assert.Len(t, shape, 6)
-			for _, name := range []string{"payment_intent_id", "status", "currency", "amount", "bank_transactions", "request_id"} {
+			assert.Len(t, shape, 8)
+			for _, name := range []string{"payment_intent_id", "status", "currency", "amount", "bank_transactions", "request_id", "created_at", "updated_at"} {
 				assert.Contains(t, shape, name)
 			}
 			for _, secret := range []string{"0222405343240007", "cvv", token, "bank-code", "merchant", "idempotency", "fingerprint"} {
@@ -577,7 +585,8 @@ func TestPaymentIntentsHandlerInFlightAndTimedOutReplays(t *testing.T) {
 }
 
 func TestPaymentIntentsHandlerHidesUnexpectedFailures(t *testing.T) {
-	f := newIntentHandler(t)
+	var output bytes.Buffer
+	f := newIntentHandlerWithLogger(t, logging.NewConsole(&output))
 	f.bank.process = func(context.Context, banksimulator.BankTransactionRequest) (banksimulator.BankAuthorizationResponse, error) {
 		return banksimulator.BankAuthorizationResponse{}, errors.New("private-bank-details")
 	}
@@ -585,4 +594,69 @@ func TestPaymentIntentsHandlerHidesUnexpectedFailures(t *testing.T) {
 	response := f.confirm(intent.PaymentIntentID, "full", intentConfirmKey, f.token(t, "full", "0222405343240007"))
 	paymentProblem(t, response, http.StatusInternalServerError)
 	assert.NotContains(t, response.Body.String(), "private-bank-details")
+	var record map[string]interface{}
+	require.NoError(t, json.Unmarshal(output.Bytes(), &record))
+	assert.Equal(t, "ERROR", record["level"])
+	assert.Equal(t, "failed to process payment intent request", record["message"])
+	assert.Contains(t, record["error"], "private-bank-details")
+	assert.Equal(t, response.Header().Get("X-Request-Id"), record["request_id"])
+	assert.Equal(t, "merchant", record["merchant_id"])
+	assert.Equal(t, intent.PaymentIntentID, record["payment_intent_id"])
+	for _, field := range []string{"idempotency_key", "bank_transaction_id"} {
+		assert.NotContains(t, record, field)
+	}
+	assert.NotContains(t, output.String(), "sk_full")
+	assert.NotContains(t, output.String(), "0222405343240007")
+}
+
+func TestPaymentIntentAttemptErrorLogsKnownIDs(t *testing.T) {
+	var output bytes.Buffer
+	handler := NewPaymentIntentsHandler(nil, logging.NewConsole(&output))
+	ctx := middleware.WithRequestID(context.Background(), "request")
+	response := httptest.NewRecorder()
+	handler.writeAttemptProblem(ctx, response, http.StatusConflict, "processing", &models.PaymentIntentResponse{
+		PaymentIntentID: "intent",
+		BankTransactions: []models.BankTransactionResponse{{
+			BankTransactionID: "transaction", Status: "Unexpected",
+		}},
+	})
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	var record map[string]interface{}
+	require.NoError(t, json.Unmarshal(output.Bytes(), &record))
+	assert.Equal(t, "request", record["request_id"])
+	assert.Equal(t, "intent", record["payment_intent_id"])
+	assert.Equal(t, "transaction", record["bank_transaction_id"])
+	assert.NotContains(t, record, "merchant_id")
+}
+
+func TestPaymentIntentHandlerLogsWriteFailureWithoutRetryingResponse(t *testing.T) {
+	var logs bytes.Buffer
+	fixture := newIntentHandlerWithLogger(t, logging.NewConsole(&logs))
+	for _, test := range []struct {
+		body   string
+		status int
+	}{
+		{`{"currency":"GBP","amount":100}`, http.StatusCreated},
+		{`{`, http.StatusBadRequest},
+	} {
+		logs.Reset()
+		request := httptest.NewRequest(http.MethodPost, "/api/PaymentIntents", strings.NewReader(test.body))
+		request.Header.Set("Authorization", "Bearer sk_full")
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Idempotency-Key", intentCreateKey)
+		response := &unwritableResponse{header: make(http.Header)}
+		fixture.router.ServeHTTP(response, request)
+		assert.Equal(t, []int{test.status}, response.statuses)
+		assert.Equal(t, 1, response.writes)
+		var record map[string]interface{}
+		require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
+		assert.Equal(t, "ERROR", record["level"])
+		assert.Equal(t, "failed to write HTTP response", record["message"])
+		assert.Equal(t, response.Header().Get("X-Request-Id"), record["request_id"])
+		assert.Equal(t, "merchant", record["merchant_id"])
+	}
+	replay := fixture.create(t, "full", intentCreateKey)
+	assert.Equal(t, models.PaymentIntentCreated, replay.Status)
+	assert.Empty(t, replay.BankTransactions)
+	assert.Zero(t, fixture.bank.calls.Load())
 }

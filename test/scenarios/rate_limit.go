@@ -11,43 +11,56 @@ import (
 )
 
 func (c *client) rateLimit(t *testing.T) {
-	// This shared HTTP probe targets the development fixture's 100/s limit.
-	// Exact admission counts and cutoff boundaries use a fake clock in unit tests.
+	path := "/api/PaymentIntents/" + uuid.NewString()
+	runCase(t, "PerMerchantBurstAndIsolation", "Exceed one merchant's 10/s quota while another merchant can still use the gateway.", func(t *testing.T) {
+		time.Sleep(time.Second)
+		inputs := make([]request, 20)
+		for i := range inputs {
+			inputs[i] = request{method: http.MethodGet, path: path, credential: c.keys.Primary}
+			if i%2 != 0 {
+				inputs[i] = request{method: http.MethodPost, path: "/api/CardTokens", credential: c.keys.Primary, body: map[string]interface{}{}}
+			}
+		}
+		rejected := 0
+		for i, result := range c.burst(t, inputs) {
+			if result.status == http.StatusTooManyRequests {
+				rejected++
+				assert.Equal(t, "1", result.headers.Get("Retry-After"))
+			} else if inputs[i].method == http.MethodGet {
+				assert.Equal(t, http.StatusNotFound, result.status)
+			} else {
+				assert.Equal(t, http.StatusBadRequest, result.status)
+			}
+		}
+		require.Positive(t, rejected, "no merchant throttling observed; use the default 10/s merchant limit")
+		c.send(t, request{method: http.MethodGet, path: path, credential: c.keys.Other}, http.StatusNotFound)
+		time.Sleep(time.Second)
+		c.send(t, request{method: http.MethodGet, path: path, credential: c.keys.Primary}, http.StatusNotFound)
+	})
+
+	// Unauthenticated traffic bypasses merchant quotas and isolates the coarse limit.
 	time.Sleep(time.Second)
 	inputs := make([]request, 200)
-	path := "/api/PaymentIntents/" + uuid.NewString()
 	for i := range inputs {
-		credential := c.keys.Primary
-		if i%4 >= 2 {
-			credential = c.keys.Other
-		}
 		if i%2 == 0 {
-			inputs[i] = request{method: http.MethodGet, path: path, credential: credential}
+			inputs[i] = request{method: http.MethodGet, path: path}
 		} else {
-			inputs[i] = request{method: http.MethodPost, path: "/api/CardTokens", credential: credential, body: map[string]interface{}{}}
+			inputs[i] = request{method: http.MethodPost, path: "/api/CardTokens", body: map[string]interface{}{}}
 		}
 	}
 	var rejected []response
-	if !runCase(t, "ConcurrentBurstAcrossRoutesAndMerchants", "A bounded burst shares one quota and produces correlated 429 responses before normal endpoint processing.", func(t *testing.T) {
-		results := c.concurrent(t, inputs)
-		routes := make(map[string]bool)
-		merchants := make(map[string]bool)
-		for i, result := range results {
+	if !runCase(t, "GlobalBurstBeforeAuthentication", "The global 100/s quota rejects excess traffic before authentication.", func(t *testing.T) {
+		results := c.burst(t, inputs)
+		for _, result := range results {
 			if result.status == 429 {
 				rejected = append(rejected, result)
-				routes[inputs[i].path] = true
-				merchants[inputs[i].credential] = true
 				assert.Equal(t, "1", result.headers.Get("Retry-After"))
 				assert.Empty(t, result.headers.Get("WWW-Authenticate"))
-			} else if inputs[i].method == http.MethodGet {
-				assert.Equal(t, 404, result.status)
 			} else {
-				assert.Equal(t, 400, result.status)
+				assert.Equal(t, http.StatusUnauthorized, result.status)
 			}
 		}
 		require.NotEmpty(t, rejected, "no throttling observed; run against an isolated development gateway with the default 100/s limit")
-		assert.Len(t, routes, 2, "both route families must share the exhausted quota")
-		assert.Len(t, merchants, 2, "both merchants must share the exhausted quota")
 	}) {
 		return
 	}

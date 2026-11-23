@@ -1,11 +1,11 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 
 	_ "github.com/cko-recruitment/payment-gateway-challenge-go/docs"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/handlers"
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/httpresponse"
 	httpSwagger "github.com/swaggo/http-swagger"
 )
 
@@ -25,10 +25,8 @@ type pong struct {
 //	@Router			/ping [get]
 func (a *Api) PingHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		if err := json.NewEncoder(w).Encode(pong{Message: "pong"}); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
+		if err := httpresponse.WriteJSON(w, http.StatusOK, "application/json", pong{Message: "pong"}); err != nil {
+			a.logger.ErrorContext(r.Context(), "failed to write HTTP response", "error", err)
 		}
 	}
 }
@@ -41,18 +39,18 @@ func (a *Api) SwaggerHandler() http.HandlerFunc {
 }
 
 func (a *Api) PostCardTokenHandler() http.HandlerFunc {
-	h := handlers.NewCardTokensHandler(a.cardTokens)
+	h := handlers.NewCardTokensHandler(a.cardTokens, a.logger)
 	return h.PostHandler()
 }
 
 func (a *Api) PostPaymentIntentHandler() http.HandlerFunc {
-	return handlers.NewPaymentIntentsHandler(a.paymentIntents).PostHandler()
+	return handlers.NewPaymentIntentsHandler(a.paymentIntents, a.logger).PostHandler()
 }
 
 func (a *Api) ConfirmPaymentIntentHandler() http.HandlerFunc {
-	return handlers.NewPaymentIntentsHandler(a.paymentIntents).ConfirmHandler()
+	return handlers.NewPaymentIntentsHandler(a.paymentIntents, a.logger).ConfirmHandler()
 }
 
 func (a *Api) GetPaymentIntentHandler() http.HandlerFunc {
-	return handlers.NewPaymentIntentsHandler(a.paymentIntents).GetHandler()
+	return handlers.NewPaymentIntentsHandler(a.paymentIntents, a.logger).GetHandler()
 }

@@ -3,7 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/httpresponse"
@@ -26,10 +26,11 @@ type CardTokenIssuer interface {
 type CardTokensHandler struct {
 	service CardTokenIssuer
 	tracer  trace.Tracer
+	logger  *slog.Logger
 }
 
-func NewCardTokensHandler(service CardTokenIssuer) *CardTokensHandler {
-	return &CardTokensHandler{service: service, tracer: otel.Tracer("payment-gateway/handlers")}
+func NewCardTokensHandler(service CardTokenIssuer, logger *slog.Logger) *CardTokensHandler {
+	return &CardTokensHandler{service: service, tracer: otel.Tracer("payment-gateway/handlers"), logger: logger}
 }
 
 // PostHandler exchanges card details for a single-use token.
@@ -57,7 +58,7 @@ func NewCardTokensHandler(service CardTokenIssuer) *CardTokensHandler {
 //	@Failure		408			{object}	models.ProblemDetails	"Request body was not received before the read deadline"
 //	@Failure		413			{object}	models.ProblemDetails	"Request body exceeds 1 MiB"
 //	@Failure		415			{object}	models.ProblemDetails	"Content-Type must be application/json"
-//	@Failure		429			{object}	models.ProblemDetails	"Global request limit exceeded"
+//	@Failure		429			{object}	models.ProblemDetails	"Global or merchant request limit exceeded"
 //	@Header			all			{string}	X-Request-Id			"Server-generated request UUIDv7 when available"
 //	@Header			all			{string}	Cache-Control			"no-store"
 //	@Header			all			{string}	Pragma					"no-cache"
@@ -67,20 +68,24 @@ func NewCardTokensHandler(service CardTokenIssuer) *CardTokensHandler {
 func (h *CardTokensHandler) PostHandler() http.HandlerFunc {
 	return h.traceCardToken(func(w http.ResponseWriter, r *http.Request) {
 		merchantID := middleware.MerchantIDFromContext(r.Context())
-		request, ok := modelbinding.BindJSON[models.CreateCardTokenRequest](w, r)
+		request, ok, err := modelbinding.BindJSON[models.CreateCardTokenRequest](w, r)
+		if err != nil {
+			h.logger.ErrorContext(r.Context(), "failed to write HTTP response", "error", err)
+			return
+		}
 		if !ok {
 			return
 		}
 		response, err := h.service.Issue(r.Context(), merchantID, *request)
 		if err != nil {
-			writeCardTokenError(r.Context(), w, err)
+			h.writeCardTokenError(r.Context(), w, err)
 			return
 		}
 		if response == nil {
-			writeCardTokenError(r.Context(), w, errors.New("issuance returned no card token"))
+			h.writeCardTokenError(r.Context(), w, errors.New("issuance returned no card token"))
 			return
 		}
-		writeCardTokenResponse(r.Context(), w, response)
+		h.writeCardTokenResponse(r.Context(), w, response)
 	})
 }
 
@@ -106,18 +111,24 @@ func (h *CardTokensHandler) traceCardToken(next http.HandlerFunc) http.HandlerFu
 	}
 }
 
-func writeCardTokenResponse(ctx context.Context, w http.ResponseWriter, response *models.CardTokenResponse) {
+func (h *CardTokensHandler) writeCardTokenResponse(ctx context.Context, w http.ResponseWriter, response *models.CardTokenResponse) {
 	response.RequestID = middleware.GetRequestID(ctx)
-	httpresponse.WriteJSON(w, http.StatusOK, "application/json", response)
+	if err := httpresponse.WriteJSON(w, http.StatusOK, "application/json", response); err != nil {
+		h.logger.ErrorContext(ctx, "failed to write HTTP response", "error", err)
+	}
 }
 
-func writeCardTokenError(ctx context.Context, w http.ResponseWriter, err error) {
+func (h *CardTokensHandler) writeCardTokenError(ctx context.Context, w http.ResponseWriter, err error) {
 	requestID := middleware.GetRequestID(ctx)
 	var validation *services.ValidationError
 	if errors.As(err, &validation) {
-		httpresponse.WriteProblem(w, http.StatusBadRequest, requestID, validation.Errors)
+		if err := httpresponse.WriteProblem(w, http.StatusBadRequest, requestID, validation.Errors); err != nil {
+			h.logger.ErrorContext(ctx, "failed to write HTTP response", "error", err)
+		}
 		return
 	}
-	log.Printf("Card token issuance failed (request_id=%s): %v", requestID, err)
-	httpresponse.WriteProblem(w, http.StatusInternalServerError, requestID, nil)
+	h.logger.ErrorContext(ctx, "failed to issue card token", "error", err)
+	if err := httpresponse.WriteProblem(w, http.StatusInternalServerError, requestID, nil); err != nil {
+		h.logger.ErrorContext(ctx, "failed to write HTTP response", "error", err)
+	}
 }

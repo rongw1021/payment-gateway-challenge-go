@@ -51,8 +51,10 @@ service does not model capture, settlement, refunds, or a financial ledger.
 
 - **Request signing:** merchant authentication uses bearer API keys, not signed
   request bodies. Internal request fingerprints are not authentication signatures.
-- **Bank transaction webhooks:** no callback endpoint, signature verification,
+- **Incoming bank webhooks:** no callback endpoint, signature verification,
   callback deduplication, or asynchronous bank-event ingestion is implemented.
+- **Outgoing merchant webhooks:** payment-intent events have a notification
+  placeholder, but it only logs a warning; no merchant callback is sent.
 
 ## 3. Architecture and Responsibility Boundaries
 
@@ -76,15 +78,17 @@ The gateway is organized into four explicit layers:
 1. **Middleware:** request policies, authentication, authorization, and HTTP telemetry.
 2. **Controllers:** HTTP handlers, model binding, input validation, and response mapping.
 3. **Application services and background services:** separate, color-coded groups
-   within the same layer. Reconciliation and the timeout sweeper are distinct services.
+   within the same layer. Audit and Reconciliation, Audit and Webhook, and the
+   Timeout Sweeper run as three distinct background services.
 4. **Repositories and integrations:** repositories and Change Data Capture (CDC)
-   sit alongside the separately colored bank integration. CDC is implemented as an
-   in-memory event queue, not database-log-based change capture.
+   sit alongside the separately colored bank integration. Two independent in-memory
+   CDC streams carry bank-transaction and payment-intent changes.
 
 Observability spans all four layers rather than forming another layer. Solid
-arrows show selected API, state, and event dependencies; dashed arrows show
-telemetry export. This is a component view, not an execution sequence or an
-exhaustive call graph. HTTP responses return over their corresponding request paths.
+arrows show selected API, state, and event dependencies. Purple dashed arrows show
+telemetry export; the amber dashed arrow shows merchant webhook delivery, which is
+not implemented. This is a component view, not an execution sequence or an exhaustive
+call graph. HTTP responses return over their corresponding request paths.
 
 The gateway returns the card token directly to the client. The client then passes
 that token, rather than PAN/CVV, to the merchant backend. The backend owns checkout
@@ -102,10 +106,9 @@ are not implemented by this gateway.
 | Controllers and model binding | Validate HTTP input and map service outcomes to stable response contracts |
 | Application services | Coordinate business operations, token consumption, bank calls, and outcome recording |
 | Repositories | Enforce ownership, idempotency, state transitions, and consistent in-process mutations |
-| Change Data Capture (CDC) | Publish and consume repository change events through an in-process, non-durable FIFO queue |
-| Bank adapter | Encapsulate the external HTTP contract and classify transport/protocol failures |
-| Reconciliation service | Observe change events and log unresolved outcomes without retrying bank calls |
-| Timeout sweeper | Mark locally stalled, scheduled attempts as pending verification |
+| Change Data Capture (CDC) | Carry bank-transaction and payment-intent changes through separate in-process FIFO streams |
+| Bank adapter | Reuse bounded connections, enforce the overall request timeout, and classify bank responses and transport failures |
+| Background services | Audit events, report unresolved outcomes and unimplemented notifications, and recover stalled attempts |
 
 The API retains services and workers rather than exposing repositories as direct
 API dependencies. Dependencies are injected through interfaces where substitution
@@ -271,9 +274,15 @@ amount and currency, current business state, and attempt history.
 | `Status` | `PaymentIntentStatus` | Current business state: `Created`, `Processing`, `Authorized`, `Declined`, or `PendingVerification`. | Yes |
 | `Currency` | `string` | Fixed currency for all attempts: GBP, USD, or EUR. | Yes |
 | `Amount` | `int32` | Fixed positive amount in the currency's minor unit; all attempts authorize this amount. | Yes |
+| `CreatedAt` | `time.Time` | Immutable UTC time the intent was created. | Yes |
+| `UpdatedAt` | `time.Time` | UTC time of the latest intent status change; initially equal to `CreatedAt`. | Yes |
 | `IdempotencyKey` | `string` | Merchant-scoped creation idempotency key, allowing repeated creation requests to resolve to the same intent. | No |
 | `RequestFingerprint` | `string` | HMAC-SHA256 fingerprint of the creation request's amount and currency; detects changed input under an existing creation key. | No |
 | `BankTransactions` | `[]BankTransaction` | Associated authorization attempts, returned oldest first; empty before the first attempt. | Yes, using the public transaction fields below |
+
+Reads, rejected requests, and idempotent replays do not advance these timestamps.
+A bank-transaction update that leaves the intent status unchanged does not advance
+`UpdatedAt` either. Responses expose the timestamps as `created_at` and `updated_at`.
 
 #### Bank transaction fields
 
@@ -423,12 +432,22 @@ The bank adapter has a deliberately narrow success contract: HTTP 200 with an
 explicit boolean authorization decision, and a nonblank authorization code when
 authorized. Missing or malformed decisions are errors, never implicit declines.
 
-The adapter bounds the entire request, including response-body reads, and limits
-response size. It does not follow redirects or add an application-level retry
-policy. This limits resource exposure and avoids forwarding card data to a
-redirected destination.
+### Connection reuse and timeout budget
 
-The important distinction is:
+The adapter reuses a pool of up to five connections per host, reducing connection
+setup overhead while bounding connection usage. Requests wait for an available
+connection when the pool is saturated. This is separate from the gateway's
+request-rate limit, not a global limit on concurrent payment requests.
+
+The adapter adds no automatic retry policy. HTTP error responses, lost responses,
+and timeouts after submission do not trigger another payment POST. Pool waiting,
+connection establishment, and response reading share one overall HTTP request
+timeout, configured in [config.development.yaml](config.development.yaml).
+
+The adapter also limits response size and does not follow redirects, avoiding
+forwarding card data to a redirected destination.
+
+### Uncertain outcomes
 
 - **Declined:** the bank provided a valid, definitive refusal. The merchant may
   create a new attempt using a new token/key.
@@ -450,22 +469,37 @@ The gateway therefore avoids automatic resubmission and retains
 `PendingVerification` unless the original in-flight request later yields a
 definitive result.
 
-## 7. Background Reconciliation and Timeout Recovery
+## 7. Background Processing and Event Auditing
+
+Three supervised services separate event observation and stalled-attempt recovery
+from HTTP request handling:
+
+| Service | Input | Responsibility |
+|---------|-------|----------------|
+| Audit and Reconciliation | Bank-transaction events | Audit each event and warn when an updated status requires verification |
+| Audit and Webhook | Payment-intent events | Audit each event and log a merchant-notification placeholder; no webhook is delivered |
+| Timeout Sweeper | Scheduled attempts exceeding the status-update timeout | Move stale attempts and their intents into pending verification |
 
 ### Change Data Capture (CDC)
 
 The repository acts as a test double for database storage, and its change events
-simulate a database CDC feed. Creating a bank transaction or updating its outcome
-produces a corresponding event through the CDC abstraction.
+simulate database CDC. Bank transactions publish `banktransaction.created` and
+`banktransaction.updated`; payment intents publish `paymentintent.created` and
+`paymentintent.updated` on creation and actual intent status changes.
 
-Events are delivered in publication order through a FIFO queue. Each event carries
-a sequence number and the original confirmation request ID, linking background
-observation to the payment attempt that caused the change.
+The streams use independent FIFO queues. Publication order and sequence numbers
+apply within each stream, not across both streams. Creation events capture the
+entity's state at creation; update events carry the changes at that point in time.
+Consumers audit these events rather than re-reading potentially newer state.
 
-The reconciliation service consumes these events asynchronously, logs transaction
-changes, and highlights outcomes requiring verification. This provides operational
-visibility into payment progress and unresolved attempts while keeping observation
-separate from payment request handling.
+Reads, rejected operations, and matching replays emit no new intent events. A
+changed bank uncertainty reason can produce a bank-transaction event without an
+intent event if the intent remains `PendingVerification`.
+
+Correlation follows the operation that caused the change: intent creation retains
+the creation request ID, while attempt-driven changes retain the original
+confirmation request ID. Merchant and entity identifiers connect both streams
+without duplicating bank history inside payment-intent events.
 
 ### Recovery from a failed database status update
 
@@ -488,7 +522,8 @@ current time - creation time >= configured status-update timeout
 
 Each sweep processes a bounded batch. The repository rechecks eligibility under
 its mutation lock, then marks `StatusUpdateTimeout`, moves the intent to
-`PendingVerification`, and emits the corresponding CDC event.
+`PendingVerification`, and emits the corresponding bank-transaction and
+payment-intent CDC events.
 
 `StatusUpdateTimeout` identifies a missing recorded outcome, not a bank decline.
 The transition makes the unresolved status visible to the reconciliation service
@@ -500,33 +535,66 @@ result, it can refine the existing attempt without submitting another payment.
 
 ### Admission control
 
-A global sliding-window limiter admits at most the configured number of requests
-in any rolling second; the default is 100 per process. It covers all routes except
-`GET /ping`, which remains available for health checks. Rejections return 429 and
-`Retry-After: 1` before authentication and payment processing.
+Two independent sliding-window limiters bound admissions in any rolling second:
 
-The limiter is shared across merchants and routes, not a per-merchant quota.
-It does not bound in-flight concurrency, provide fairness, or protect an entire
-multi-instance deployment.
+- **Global:** defaults to 100 requests per second per process, before authentication.
+  It covers all routes except `GET /ping`, which remains available for health checks.
+- **Per merchant:** defaults to 10 requests per second, after authentication and
+  scope checks but before idempotency-key validation, body binding, and payment
+  processing. All API keys and protected routes for the same merchant share one quota.
+
+Either stage rejects excess requests with 429 and `Retry-After: 1`. Authentication
+and scope failures do not consume merchant quota; admitted requests with invalid
+idempotency keys or bodies do. A merchant-level rejection still consumes global capacity,
+because that request has already passed the coarse limiter.
+
+Both limits are per process. They do not bound in-flight concurrency, guarantee
+fairness under global saturation, or coordinate a multi-instance deployment.
 
 ### Bounded work and failure handling
 
 | Control | Design purpose |
 |---------|----------------|
 | 1 MiB HTTP request-body limit | Bound model-binding input |
+| Header and request-read deadlines | Bound slow uploads before payment processing |
+| Response-write and idle-connection deadlines | Release stalled responses and unused keep-alive connections |
 | 64 KiB bank response limit | Bound untrusted upstream data |
-| Configurable bank timeout | Avoid indefinitely blocked authorization calls |
+| Five bank connections per host | Bound connection usage and enable reuse |
+| Overall bank request timeout | Bound connection acquisition and the complete bank interaction |
 | Bounded timeout-sweep batches | Limit work performed by each recovery pass |
 | Bounded asynchronous telemetry queues and export timeouts | Keep observability outages off the payment response path |
 
-The HTTP server and both background workers share a supervised lifecycle.
-Unexpected worker failure stops the server and sibling worker rather than leaving
+The response-write budget must leave room for request reading and the configured
+bank timeout. Slow POST body uploads return 408 before business processing;
+incomplete headers or stalled response writes may instead close the connection.
+
+Unexpected handler panics produce sanitized 500 ProblemDetails if no response has
+started. Once a response is committed, recovery aborts the connection or stream
+rather than appending another response. Response-delivery failures are logged;
+they do not roll back payment state or prove that the bank declined the payment.
+
+The HTTP server and all three background workers share a supervised lifecycle.
+Unexpected worker failure stops the server and sibling workers rather than leaving
 a partially functioning instance running unnoticed.
 
 Cancellation propagates to active work. HTTP shutdown uses a fresh bounded context
 after cancellation, and observability gets a separate bounded flush phase. This
 does not guarantee completion of in-flight bank operations or draining of all
 change events. The liveness endpoint does not assert bank or telemetry availability.
+
+### Retry policy
+
+Automatic exponential-backoff retries are intentionally omitted for bank submissions
+and repository operations in this assessment. The bank simulator returns the same
+configured outcome for a given valid input and provides no verification API. The
+in-memory repository represents database storage without a remote connection or
+transient database failures to recover from.
+
+Clients can replay requests using the same idempotency key without creating another
+payment attempt. An uncertain bank outcome must not trigger automatic resubmission.
+With real integrations, bounded backoff retries would be considered only for
+transient failures where repeating the operation is safe; backoff alone does not
+prevent duplicate payments.
 
 ## 9. Observability
 
@@ -536,9 +604,11 @@ remains independent of that infrastructure.
 
 | Signal | Current scope and purpose |
 |--------|---------------------------|
-| HTTP logs | INFO for card-token/payment-intent route families, including errors; route template, method, status, latency, request ID |
-| Change-event logs | Redacted creation/update events with request, intent, and transaction IDs |
+| HTTP request summaries | INFO for card-token/payment-intent route families, including error responses; route template, method, status, latency, request ID |
+| Application errors | ERROR records for unexpected application failures, recovered panics, and failed response writes |
+| Event audits | INFO records containing sanitized serialized events, with merchant, event type, sequence, and available correlation IDs promoted as structured fields |
 | Pending-verification warnings | Highlight outcomes that cannot be resolved automatically |
+| Webhook placeholder warnings | Indicate that merchant notification delivery is not implemented |
 | HTTP metrics | Request counts, non-5xx counts, and duration histograms by method, route template, and status |
 | Traces | One server span around the card-token handler, with upstream trace-context propagation |
 
@@ -551,9 +621,15 @@ Metrics use delta counts and aggregatable histograms:
 - **P95 latency:** an estimate from merged histograms, not an average of independently
   calculated percentiles.
 
-Request IDs connect HTTP logs with asynchronous bank-event logs. Replays receive
-new request IDs, while transaction events retain the originating attempt's ID.
-Metric dimensions exclude high-cardinality request and transaction identifiers.
+Handlers, services, and workers receive a shared structured logger. Context-aware
+records include `request_id`, `merchant_id`, `payment_intent_id`, and
+`bank_transaction_id` when available; absent fields are omitted. Errors are separate
+attributes rather than interpolated into message text. Audit messages deliberately
+retain the serialized event, with selected fields also promoted for filtering.
+
+Request IDs connect HTTP logs with both event streams. Replays receive new request
+IDs, while attempt-driven events retain the originating confirmation's ID. Metric
+dimensions exclude high-cardinality request and transaction identifiers.
 
 Export is best effort. Queues can overflow, failed delta exports can undercount
 metrics, and shutdown may leave telemetry undelivered. Telemetry is therefore
@@ -575,7 +651,11 @@ card-operation spans, and full payment/bank tracing are not implemented.
 
 ![Payment Gateway Dashboard showing HTTP request metrics, gateway logs, and card-token traces](images/payment_gateway_dashboard.png)
 
-*Screenshot captured after an E2E test run, showing the resulting metrics, logs, and traces.*
+*Screenshot captured after an E2E test run, showing the resulting metrics, logs, and
+traces. Metrics may take tens of seconds to appear: the gateway exports every 10
+seconds, followed by Collector batching, Elasticsearch indexing, and the dashboard's
+default 10-second refresh cycle. Leave the stack running and refresh the dashboard
+after allowing time for export.*
 
 ## 10. API Contract and Documentation
 
@@ -598,8 +678,9 @@ returns 200 with the current state, while a new attempt on a pending intent retu
 context. Clients must not resubmit an uncertain payment with a new idempotency key.
 
 The HTTP contract distinguishes validation errors (400), authentication (401),
-authorization (403), unavailable/foreign resources (404), state/idempotency
-conflicts (409), oversized or unsupported input (413/415), and throttling (429).
+authorization (403), unavailable/foreign resources (404), request-body read timeouts
+(408), state/idempotency conflicts (409), oversized or unsupported input (413/415),
+and throttling (429).
 Unexpected request-processing or outcome-recording failures remain server errors
 (500), rather than being converted to 202, and do not expose raw bank payloads.
 
@@ -623,17 +704,21 @@ lifecycle, rate limiting, and observability. Fake clocks and controlled dependen
 exercise timing and failure cases that cannot reliably be forced through a deployed
 API. Race-enabled runs complement functional assertions.
 
+Focused cases also cover connection-pool limits and reuse, request timeouts and
+cancellation, slow requests, panic recovery, failed response writes, independent
+event streams, and timestamps that remain unchanged on replay.
+
 Run the internal unit and component tests from the repository root:
 
 ```powershell
 go test -v -race .\internal\... -count=1
 ```
 
-Recorded unit/component statement coverage:
+Unit/component statement coverage:
 
 | Scope | Statement coverage |
 |-------|--------------------|
-| Internal application packages | **91.4%** |
+| Internal application packages | **92.5%** |
 
 This figure covers production Go packages under [internal](internal/), exercised
 by their unit and component tests. Integration and E2E tests are assessed
@@ -642,7 +727,7 @@ separately.
 To measure this scope:
 
 ```powershell
-go test -race -covermode=atomic -coverpkg=github.com/cko-recruitment/payment-gateway-challenge-go/internal/... .\internal\... -coverprofile=coverage.out -count=1
+go test -race -covermode=atomic '-coverpkg=github.com/cko-recruitment/payment-gateway-challenge-go/internal/...' .\internal\... -coverprofile=coverage.out -count=1
 go tool cover -func=coverage.out
 ```
 
@@ -661,7 +746,7 @@ are not duplicated between integration and E2E tests.
 | [Payment intent creation](test/scenarios/payment_intent_creation.go) | Supported currencies and amount boundaries; missing/invalid idempotency keys; matching replay; changed-payload conflicts; merchant-scoped keys; concurrent creation |
 | [Payment intent confirmation](test/scenarios/payment_intent_confirmation.go) | Input validation; permitted and blocked states; authorization, decline, and 202 pending-verification outcomes; new attempts after declines; immediate/historical replays; token ownership and single use; concurrent confirmations |
 | [Payment intent retrieval](test/scenarios/payment_intent_retrieval.go) | Invalid, missing, or foreign IDs; Created, Authorized, Declined, and PendingVerification states; complete ordered history; masked card details |
-| [Rate limiting](test/scenarios/rate_limit.go) | Shared quota across routes and merchants; 429 responses and Retry-After headers; recovery; GET `/ping` exemption; concurrent admission |
+| [Rate limiting](test/scenarios/rate_limit.go) | Global throttling before authentication; per-merchant quota across routes and merchant isolation; 429 responses and Retry-After headers; recovery; GET `/ping` exemption |
 
 Cases cover meaningful input equivalence classes, state transitions, ownership,
 replays/conflicts, and competing requests rather than a Cartesian product of invalid
@@ -686,8 +771,10 @@ E2E tests exercise the deployed HTTP contract against an already-running gateway
 and bank simulator. They do not start, reconfigure, or stop those services.
 Configure the gateway URL and test API keys in
 [config.e2e.yml](test/e2e/config.e2e.yml) to match the deployment. Use an isolated
-development instance with the default limit of 100 requests per second, as expected
-by the shared rate-limit scenario.
+development instance with the default limits of 100 requests per second globally
+and 10 per merchant, as expected by the shared rate-limit scenarios. Ordinary
+scenarios are paced below the merchant limit; business-concurrency cases run
+separately from intentional rate-limit bursts.
 
 1. Start the gateway and bank simulator following [Running in Docker](#running-in-docker).
 2. Run the E2E tests from the repository root with the opt-in `e2e` build tag:
@@ -719,6 +806,25 @@ to `development`; `OBSERVABILITY` can explicitly override its export-enabled fla
 The container uses the development file directly with Docker service addresses.
 Host execution uses a local profile with localhost addresses.
 
+The profile also controls inbound HTTP deadlines and the overall bank request
+timeout. Omitted HTTP deadlines default to 5s for headers, 15s for request reading,
+30s for response writing, and 60s for idle connections; the supplied development
+profile overrides request reading to 10s.
+Timeout combinations that leave no response budget beyond request reading and
+the bank call are rejected at startup.
+
+Rate-limit defaults and the supplied development profile use:
+
+```yaml
+rate_limit:
+  global_requests_per_second: 100
+  per_merchant_requests_per_second: 10
+```
+
+Both values must be positive integers. Older profiles must rename
+`requests_per_second` to `global_requests_per_second`; an omitted merchant limit
+defaults to 10.
+
 Configuration changes require a restart or recreation, which also clears gateway
 state. The development stack exposes the gateway and observability interfaces on
 loopback, but uses local HTTP and a security-disabled Elasticsearch/Kibana setup.
@@ -746,6 +852,13 @@ docker compose up --build -d
 ```powershell
 docker compose -f docker-compose.yml -f docker-compose.observability.yml up --build -d
 ```
+
+> **First-run download:** Pulling and extracting the three additional observability
+> images can take several minutes, depending on network and disk speed. Docker
+> reports approximate local image sizes of **445 MB** for OpenTelemetry Collector,
+> **2.55 GB** for Elasticsearch, and **2.51 GB** for Kibana; compressed download sizes
+> differ. Subsequent runs reuse cached images. The Kibana setup service reuses the
+> same Kibana image rather than requiring a fourth download.
 
 Local endpoints:
 
@@ -801,25 +914,313 @@ For detailed endpoint descriptions, request and response schemas, and interactiv
 API testing, see the [Swagger UI](http://localhost:8090/swagger/index.html),
 available after starting the gateway.
 
+### Successful Payment Authorization with cURL
+
+This walkthrough pays **GBP 1.00** (`amount: 100`) using a synthetic card ending in
+`7`, which the bank simulator authorizes. Run the snippets in order in the same
+**PowerShell 7** session, with the gateway and bank simulator running.
+
+`curl.exe --verbose` shows outgoing request headers and incoming response headers;
+the commands specify the request bodies and print the captured response bodies.
+`--fail-with-body` and the exit-code checks stop the walkthrough on HTTP errors.
+This output contains the public development API key and synthetic card details:
+do not use real credentials or card data in a recorded walkthrough.
+
+```powershell
+$baseUrl = 'http://localhost:8090'
+$apiKey = 'sk_development1'
+$createKey = [guid]::NewGuid().ToString()
+$confirmKey = [guid]::NewGuid().ToString()
+```
+
+The exchanges below were captured from the local Docker stack. Connection
+diagnostics are omitted and JSON is formatted for readability; `Content-Length`
+reflects the original compact JSON. Your IDs and timestamps will differ. Use the
+variables populated by the commands, not the captured IDs, and confirm within the
+card token's 15-minute lifetime.
+
+#### 1. Tokenize the card
+
+The client exchanges card details for a merchant-owned, single-use token. This
+does not submit a payment to the bank.
+
+```powershell
+$tokenBody = curl.exe --silent --show-error --fail-with-body --verbose `
+  "$baseUrl/api/CardTokens" `
+  --header "Authorization: Bearer $apiKey" `
+  --header 'Content-Type: application/json' `
+  --data-raw '{"card_number":"2222405343240007","expiry_month":12,"expiry_year":2099,"cvv":"012"}'
+if ($LASTEXITCODE -ne 0) { throw 'Card tokenization failed.' }
+$tokenBody
+$cardToken = ($tokenBody | ConvertFrom-Json).token
+if (-not $cardToken) { throw 'Token response is missing its token.' }
+```
+
+**Captured request:**
+
+```http
+POST /api/CardTokens HTTP/1.1
+Host: localhost:8090
+User-Agent: curl/8.21.0
+Accept: */*
+Authorization: Bearer sk_development1
+Content-Type: application/json
+Content-Length: 83
+
+{
+  "card_number": "2222405343240007",
+  "expiry_month": 12,
+  "expiry_year": 2099,
+  "cvv": "012"
+}
+```
+
+**Captured response:**
+
+```http
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json
+Pragma: no-cache
+X-Request-Id: 01a20703-db8d-7840-8009-f9e51212a62c
+Date: Mon, 23 Nov 2026 06:07:03 GMT
+Content-Length: 146
+
+{
+  "token": "01a20703-db8d-7c81-9a6a-95c0278cc8f1",
+  "expires_at": "2026-11-23T06:22:03.053818058Z",
+  "request_id": "01a20703-db8d-7840-8009-f9e51212a62c"
+}
+```
+
+#### 2. Create the payment intent
+
+The merchant backend supplies the currency, amount in minor units, and a fresh
+creation idempotency key. The intent starts as `Created`, with no bank attempts.
+
+```powershell
+$intentBody = curl.exe --silent --show-error --fail-with-body --verbose `
+  "$baseUrl/api/PaymentIntents" `
+  --header "Authorization: Bearer $apiKey" `
+  --header "X-Idempotency-Key: $createKey" `
+  --header 'Content-Type: application/json' `
+  --data-raw '{"currency":"GBP","amount":100}'
+if ($LASTEXITCODE -ne 0) { throw 'Payment intent creation failed.' }
+$intentBody
+$intentId = ($intentBody | ConvertFrom-Json).payment_intent_id
+if (-not $intentId) { throw 'Intent response is missing its ID.' }
+```
+
+**Captured request:**
+
+```http
+POST /api/PaymentIntents HTTP/1.1
+Host: localhost:8090
+User-Agent: curl/8.21.0
+Accept: */*
+Authorization: Bearer sk_development1
+X-Idempotency-Key: fd1477c6-1bce-43b0-8c1e-366785d3c200
+Content-Type: application/json
+Content-Length: 31
+
+{
+  "currency": "GBP",
+  "amount": 100
+}
+```
+
+**Captured response:**
+
+```http
+HTTP/1.1 201 Created
+Cache-Control: no-store
+Content-Type: application/json
+Location: /api/PaymentIntents/01a20703-dc9c-7416-8d35-d5b79916aa7f
+Pragma: no-cache
+X-Request-Id: 01a20703-dc9c-7152-bac0-3f10eb799002
+Date: Mon, 23 Nov 2026 06:07:03 GMT
+Content-Length: 274
+
+{
+  "payment_intent_id": "01a20703-dc9c-7416-8d35-d5b79916aa7f",
+  "status": "Created",
+  "currency": "GBP",
+  "amount": 100,
+  "created_at": "2026-11-23T06:07:03.32426856Z",
+  "updated_at": "2026-11-23T06:07:03.32426856Z",
+  "bank_transactions": [],
+  "request_id": "01a20703-dc9c-7152-bac0-3f10eb799002"
+}
+```
+
+The `Location` header identifies the retrieval endpoint for this intent.
+
+#### 3. Confirm and authorize the payment
+
+The merchant backend submits the token and a separate confirmation idempotency
+key. The gateway consumes the token, calls the bank simulator, and records its
+authorization before returning the intent and transaction history.
+
+```powershell
+$confirmationJson = @{ card_token = $cardToken } | ConvertTo-Json -Compress
+Write-Output "Request body: $confirmationJson"
+$confirmedBody = curl.exe --silent --show-error --fail-with-body --verbose `
+  "$baseUrl/api/PaymentIntents/$intentId/confirm" `
+  --header "Authorization: Bearer $apiKey" `
+  --header "X-Idempotency-Key: $confirmKey" `
+  --header 'Content-Type: application/json' `
+  --data-raw $confirmationJson
+if ($LASTEXITCODE -ne 0) { throw 'Payment confirmation failed.' }
+$confirmedBody
+$confirmed = $confirmedBody | ConvertFrom-Json
+if ($confirmed.status -ne 'Authorized') {
+  throw "Expected Authorized, received $($confirmed.status)."
+}
+```
+
+**Captured request:**
+
+```http
+POST /api/PaymentIntents/01a20703-dc9c-7416-8d35-d5b79916aa7f/confirm HTTP/1.1
+Host: localhost:8090
+User-Agent: curl/8.21.0
+Accept: */*
+Authorization: Bearer sk_development1
+X-Idempotency-Key: 9464e1dd-d8b4-4dbb-b79d-1f5dca803ab8
+Content-Type: application/json
+Content-Length: 53
+
+{
+  "card_token": "01a20703-db8d-7c81-9a6a-95c0278cc8f1"
+}
+```
+
+**Captured response:**
+
+```http
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json
+Pragma: no-cache
+X-Request-Id: 01a20703-ddb3-7532-ba5b-96598bf52047
+Date: Mon, 23 Nov 2026 06:07:03 GMT
+Content-Length: 522
+
+{
+  "payment_intent_id": "01a20703-dc9c-7416-8d35-d5b79916aa7f",
+  "status": "Authorized",
+  "currency": "GBP",
+  "amount": 100,
+  "created_at": "2026-11-23T06:07:03.32426856Z",
+  "updated_at": "2026-11-23T06:07:03.61232233Z",
+  "bank_transactions": [
+    {
+      "bank_transaction_id": "01a20703-ddb3-7850-8bc5-948148be3e5f",
+      "status": "Authorized",
+      "card_number_last_four": "0007",
+      "expiry_month": 12,
+      "expiry_year": 2099,
+      "created_at": "2026-11-23T06:07:03.603545518Z",
+      "completed_at": "2026-11-23T06:07:03.61232233Z"
+    }
+  ],
+  "request_id": "01a20703-ddb3-7532-ba5b-96598bf52047"
+}
+```
+
+Both the intent and its attempt are `Authorized`. The response includes every
+required payment field: ID, status, currency, amount, and the last four card digits
+and expiry details nested inside `bank_transactions`. It contains neither the full
+card number nor the CVV.
+
+#### 4. Retrieve the authorized payment
+
+Use the payment-intent ID to retrieve the persisted outcome. This is a GET request
+with no request body or idempotency key, and it does not call the bank again.
+
+```powershell
+$retrievedBody = curl.exe --silent --show-error --fail-with-body --verbose `
+  "$baseUrl/api/PaymentIntents/$intentId" `
+  --header "Authorization: Bearer $apiKey"
+if ($LASTEXITCODE -ne 0) { throw 'Payment retrieval failed.' }
+$retrievedBody
+```
+
+**Captured request (no body):**
+
+```http
+GET /api/PaymentIntents/01a20703-dc9c-7416-8d35-d5b79916aa7f HTTP/1.1
+Host: localhost:8090
+User-Agent: curl/8.21.0
+Accept: */*
+Authorization: Bearer sk_development1
+```
+
+**Captured response:**
+
+```http
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json
+Pragma: no-cache
+X-Request-Id: 01a20703-deb1-752a-8d49-f76e0a315e71
+Date: Mon, 23 Nov 2026 06:07:03 GMT
+Content-Length: 522
+
+{
+  "payment_intent_id": "01a20703-dc9c-7416-8d35-d5b79916aa7f",
+  "status": "Authorized",
+  "currency": "GBP",
+  "amount": 100,
+  "created_at": "2026-11-23T06:07:03.32426856Z",
+  "updated_at": "2026-11-23T06:07:03.61232233Z",
+  "bank_transactions": [
+    {
+      "bank_transaction_id": "01a20703-ddb3-7850-8bc5-948148be3e5f",
+      "status": "Authorized",
+      "card_number_last_four": "0007",
+      "expiry_month": 12,
+      "expiry_year": 2099,
+      "created_at": "2026-11-23T06:07:03.603545518Z",
+      "completed_at": "2026-11-23T06:07:03.61232233Z"
+    }
+  ],
+  "request_id": "01a20703-deb1-752a-8d49-f76e0a315e71"
+}
+```
+
+The intent ID, transaction ID, payment details, and timestamps match the
+confirmation response. Only `request_id` changes, identifying this separate HTTP
+request; it also matches the response's `X-Request-Id` header.
+
 ## 13. Known Limitations and Production Evolution
 
 The implementation establishes useful payment semantics without claiming
 production-grade distributed guarantees. The main next steps would be:
 
-1. **Durable transactional state:** persist merchant-scoped idempotency records and
-   attempts with uniqueness/transaction guarantees; preserve fingerprint-key
-   material appropriately across restarts.
-2. **Authoritative bank reconciliation:** obtain a bank lookup or signed callback
-   protocol, define safe reconciliation transitions, and coordinate upstream
-   idempotency before considering payment retries.
-3. **Reliable event delivery:** replace the in-memory change queue/publication gap
-   with a durable outbox and explicit delivery semantics.
-4. **Stronger card-data isolation:** use an appropriate tokenization/vault design
+1. **Durable storage and change capture:** use a transactional database with native
+   CDC for durable state and change capture instead of in-memory storage and queues.
+   Consider merchant-aware sharding as load grows to distribute storage and
+   concurrent writes. The shard design must preserve merchant-scoped idempotency
+   and uniqueness/transaction guarantees. Retain fingerprint-key material across
+   restarts and define event delivery, replay, and consumer-recovery semantics.
+   Use indexed queries and retention policies to keep data access efficient and
+   storage growth bounded.
+2. **Authoritative bank reconciliation:** integrate bank lookup APIs or signed
+   bank-transaction webhooks to resolve uncertain outcomes. Define safe
+   reconciliation transitions and coordinate upstream idempotency before
+   considering automatic payment resubmission.
+3. **Stronger card-data isolation:** use an appropriate tokenization/vault design
    and eliminate retention that is not justified or permitted.
-5. **Scalable admission and storage:** introduce shared limits, per-merchant
-   fairness, connection/concurrency controls, indexed queries, and retention.
-6. **Production operations:** add readiness policy, security hardening, durable
-   audit requirements, alerting/SLOs, and broader trace instrumentation.
+4. **Resilience and admission control:** introduce distributed rate limits,
+   per-merchant fairness, bounded concurrency, circuit breakers, and backpressure.
+   Apply retries only where operations are safe to repeat; uncertain payments must
+   not be blindly resubmitted.
+5. **Production operations:** add readiness policy, security hardening, durable
+   audit requirements, alerting/SLOs, and broader trace instrumentation. Introduce
+   CI/CD pipelines, for example with GitHub Actions, to automate testing, security
+   checks, container builds, and controlled deployments with approval and rollback
+   procedures.
 
 These are deliberate evolution points, not guarantees supplied by the current
 in-memory assessment implementation.

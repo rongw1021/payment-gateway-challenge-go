@@ -1,3 +1,6 @@
+// Package logging creates injectable slog loggers with console and optional OTLP output.
+// Context-aware calls include available request, merchant, payment-intent and bank-transaction
+// IDs; explicit attributes take precedence. Context fields follow the logger's current group.
 package logging
 
 import (
@@ -32,17 +35,17 @@ func jsonHandler(output io.Writer) slog.Handler {
 }
 
 func NewConsole(output io.Writer) *slog.Logger {
-	return slog.New(jsonHandler(output))
+	return slog.New(&contextHandler{Handler: jsonHandler(output)})
 }
 
 func New(output io.Writer) (*slog.Logger, error) {
 	if output == nil {
 		return nil, errors.New("console log output is required")
 	}
-	return slog.New(&combinedHandler{
+	return slog.New(&contextHandler{Handler: &combinedHandler{
 		console: jsonHandler(output),
 		export:  otelslog.NewHandler("payment-gateway/logging"),
-	}), nil
+	}}), nil
 }
 
 func (h *combinedHandler) Enabled(ctx context.Context, level slog.Level) bool {

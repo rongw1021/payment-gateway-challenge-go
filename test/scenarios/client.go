@@ -133,8 +133,8 @@ func (c *client) do(t *testing.T, input request) (result response, err error) {
 
 func (c *client) send(t *testing.T, input request, status int) response {
 	t.Helper()
-	// Keep sequential scenarios below the deployed gateway's default rate limit.
-	if wait := 25*time.Millisecond - time.Since(c.lastSentAt); wait > 0 {
+	// Keep sequential scenarios below the default 10/s merchant limit.
+	if wait := 125*time.Millisecond - time.Since(c.lastSentAt); wait > 0 {
 		time.Sleep(wait)
 	}
 	c.lastSentAt = time.Now()
@@ -182,6 +182,15 @@ func (r response) string(t *testing.T, key string) string {
 
 func (r response) transactions(t *testing.T) []transaction {
 	t.Helper()
+	created, err := time.Parse(time.RFC3339Nano, r.string(t, "created_at"))
+	require.NoError(t, err)
+	updated, err := time.Parse(time.RFC3339Nano, r.string(t, "updated_at"))
+	require.NoError(t, err)
+	assert.False(t, created.IsZero())
+	assert.False(t, updated.Before(created))
+	if r.string(t, "status") == "Created" {
+		assert.Equal(t, created, updated)
+	}
 	require.Contains(t, r.body, "bank_transactions")
 	assert.NotEqual(t, "null", string(r.body["bank_transactions"]))
 	var result []transaction
@@ -251,6 +260,15 @@ func (c *client) confirm(t *testing.T, id, token, key string, status int) respon
 }
 
 func (c *client) concurrent(t *testing.T, inputs []request) []response {
+	t.Helper()
+	// Business-concurrency cases fit within one merchant quota, independent of setup traffic.
+	time.Sleep(time.Second)
+	results := c.burst(t, inputs)
+	time.Sleep(time.Second)
+	return results
+}
+
+func (c *client) burst(t *testing.T, inputs []request) []response {
 	t.Helper()
 	results := make([]response, len(inputs))
 	errs := make([]error, len(inputs))

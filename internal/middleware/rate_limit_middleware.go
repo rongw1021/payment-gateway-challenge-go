@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -19,7 +20,7 @@ type RateLimiter struct {
 
 func NewRateLimiter(requestsPerSecond int) (*RateLimiter, error) {
 	if requestsPerSecond <= 0 {
-		return nil, errors.New("rate_limit.requests_per_second must be positive")
+		return nil, errors.New("rate_limit.global_requests_per_second must be positive")
 	}
 	return &RateLimiter{limit: requestsPerSecond, now: time.Now}, nil
 }
@@ -41,26 +42,30 @@ func (l *RateLimiter) allow() bool {
 	return true
 }
 
-func (l *RateLimiter) Limit(next http.Handler) http.Handler {
-	reject := NoStore(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Retry-After", "1")
-		httpresponse.WriteProblem(w, http.StatusTooManyRequests, GetRequestID(r.Context()), nil)
-	}))
-	rejectWithMetadata := RequestID(reject)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/ping" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if l.allow() {
-			next.ServeHTTP(w, r)
-			return
-		}
-		// Non-payment routes do not otherwise run request-ID middleware.
-		if GetRequestID(r.Context()) == "" {
-			rejectWithMetadata.ServeHTTP(w, r)
-			return
-		}
-		reject.ServeHTTP(w, r)
-	})
+func (l *RateLimiter) Limit(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		reject := NoStore(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Retry-After", "1")
+			if err := httpresponse.WriteProblem(w, http.StatusTooManyRequests, GetRequestID(r.Context()), nil); err != nil {
+				logger.ErrorContext(r.Context(), "failed to write HTTP response", "error", err)
+			}
+		}))
+		rejectWithMetadata := RequestID(logger)(reject)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && r.URL.Path == "/ping" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if l.allow() {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Non-payment routes do not otherwise run request-ID middleware.
+			if GetRequestID(r.Context()) == "" {
+				rejectWithMetadata.ServeHTTP(w, r)
+				return
+			}
+			reject.ServeHTTP(w, r)
+		})
+	}
 }

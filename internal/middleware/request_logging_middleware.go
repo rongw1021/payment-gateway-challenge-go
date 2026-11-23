@@ -11,7 +11,7 @@ import (
 
 func RequestLogging(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		withMetadata := NoStore(RequestID(next))
+		withMetadata := NoStore(RequestID(logger)(next))
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			family := requestFamily(r.URL.Path)
 			if family == "" {

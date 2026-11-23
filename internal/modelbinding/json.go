@@ -13,12 +13,13 @@ import (
 )
 
 // BindJSON decodes and validates a JSON request, writing an HTTP error on failure.
-func BindJSON[T any](w http.ResponseWriter, r *http.Request) (*T, bool) {
+// The returned error reports a failed response write; false with nil means the
+// invalid request was handled successfully. Neither case should be processed further.
+func BindJSON[T any](w http.ResponseWriter, r *http.Request) (*T, bool, error) {
 	requestID := middleware.GetRequestID(r.Context())
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || contentType != "application/json" {
-		httpresponse.WriteProblem(w, http.StatusUnsupportedMediaType, requestID, nil)
-		return nil, false
+		return nil, false, httpresponse.WriteProblem(w, http.StatusUnsupportedMediaType, requestID, nil)
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	decoder := json.NewDecoder(r.Body)
@@ -37,21 +38,19 @@ func BindJSON[T any](w http.ResponseWriter, r *http.Request) (*T, bool) {
 		var tooLarge *http.MaxBytesError
 		var timeout net.Error
 		if errors.As(err, &tooLarge) {
-			httpresponse.WriteProblem(w, http.StatusRequestEntityTooLarge, requestID, nil)
+			return nil, false, httpresponse.WriteProblem(w, http.StatusRequestEntityTooLarge, requestID, nil)
 		} else if errors.As(err, &timeout) && timeout.Timeout() {
-			httpresponse.WriteProblem(w, http.StatusRequestTimeout, requestID, nil)
+			return nil, false, httpresponse.WriteProblem(w, http.StatusRequestTimeout, requestID, nil)
 		} else {
-			httpresponse.WriteProblem(w, http.StatusBadRequest, requestID, map[string][]string{
+			return nil, false, httpresponse.WriteProblem(w, http.StatusBadRequest, requestID, map[string][]string{
 				"body": {"A single JSON object is required."},
 			})
 		}
-		return nil, false
 	}
 	if validator, ok := any(request).(interface{ Validate() map[string][]string }); ok {
 		if fields := validator.Validate(); len(fields) != 0 {
-			httpresponse.WriteProblem(w, http.StatusBadRequest, requestID, fields)
-			return nil, false
+			return nil, false, httpresponse.WriteProblem(w, http.StatusBadRequest, requestID, fields)
 		}
 	}
-	return request, true
+	return request, true, nil
 }

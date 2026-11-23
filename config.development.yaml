@@ -11,7 +11,8 @@ server:
   idle_timeout: 60s
 
 rate_limit:
-  requests_per_second: 100
+  global_requests_per_second: 100
+  per_merchant_requests_per_second: 10
 
 authentication:
   api_keys:
@@ -39,6 +40,7 @@ authentication:
 
 bank_simulator:
   base_address: "http://bank_simulator:8080/"
+  # Total budget includes pool waiting, connection establishment, and response reads.
   timeout: 5s
 
 observability:

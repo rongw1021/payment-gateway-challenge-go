@@ -60,6 +60,8 @@ type Failure struct {
 func (f *Failure) Error() string { return "bank request failed (" + string(f.Kind) + ")" }
 func (f *Failure) Unwrap() error { return f.Cause }
 
+// NewClient owns a pool of up to five connections per host. Pool waits, connection
+// establishment, and response reads share the overall HTTP request timeout.
 func NewClient(baseAddress string, timeout time.Duration) (*HTTPClient, error) {
 	address, err := url.Parse(baseAddress)
 	if err != nil || address.Hostname() == "" ||
@@ -72,15 +74,28 @@ func NewClient(baseAddress string, timeout time.Duration) (*HTTPClient, error) {
 	if timeout < time.Millisecond || timeout > (1<<31-1)*time.Millisecond {
 		return nil, errors.New("bank simulator timeout must be between 1 and 2147483647 milliseconds")
 	}
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, errors.New("default HTTP transport must support cloning")
+	}
+	transport := defaultTransport.Clone()
+	transport.MaxConnsPerHost = 5
+	transport.MaxIdleConnsPerHost = 5
+	transport.MaxIdleConns = 5
 	return &HTTPClient{
 		httpClient: &http.Client{
-			Timeout: timeout,
+			Timeout: timeout, Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		},
 		paymentsURL: address.ResolveReference(&url.URL{Path: "payments"}).String(),
 	}, nil
+}
+
+// CloseIdleConnections releases pooled idle connections without interrupting active requests.
+func (c *HTTPClient) CloseIdleConnections() {
+	c.httpClient.CloseIdleConnections()
 }
 
 func (c *HTTPClient) ProcessBankTransaction(ctx context.Context, request BankTransactionRequest) (BankAuthorizationResponse, error) {

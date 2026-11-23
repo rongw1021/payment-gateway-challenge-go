@@ -3,14 +3,14 @@ package handlers
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/httpresponse"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/middleware"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/modelbinding"
 	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/models"
-	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/services"
+	"github.com/cko-recruitment/payment-gateway-challenge-go/internal/requestcontext"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -18,15 +18,16 @@ import (
 type PaymentIntentService interface {
 	CreatePaymentIntent(context.Context, string, string, models.CreatePaymentIntentRequest) (*models.PaymentIntentResponse, bool, error)
 	ConfirmPaymentIntent(context.Context, string, string, string, models.ConfirmPaymentIntentRequest) (*models.PaymentIntentResponse, error)
-	GetPaymentIntent(string, string) (*models.PaymentIntentResponse, error)
+	GetPaymentIntent(context.Context, string, string) (*models.PaymentIntentResponse, error)
 }
 
 type PaymentIntentsHandler struct {
 	service PaymentIntentService
+	logger  *slog.Logger
 }
 
-func NewPaymentIntentsHandler(service PaymentIntentService) *PaymentIntentsHandler {
-	return &PaymentIntentsHandler{service: service}
+func NewPaymentIntentsHandler(service PaymentIntentService, logger *slog.Logger) *PaymentIntentsHandler {
+	return &PaymentIntentsHandler{service: service, logger: logger}
 }
 
 // PostHandler creates a payment intent.
@@ -56,7 +57,7 @@ func NewPaymentIntentsHandler(service PaymentIntentService) *PaymentIntentsHandl
 //	@Failure		409					{object}	models.ProblemDetails	"Idempotency key reused with different intent details"
 //	@Failure		413					{object}	models.ProblemDetails	"Request body exceeds 1 MiB"
 //	@Failure		415					{object}	models.ProblemDetails	"Content-Type must be application/json"
-//	@Failure		429					{object}	models.ProblemDetails	"Global request limit exceeded"
+//	@Failure		429					{object}	models.ProblemDetails	"Global or merchant request limit exceeded"
 //	@Header			201					{string}	Location				"Relative payment-intent lookup URL, also returned on replay"
 //	@Header			all					{string}	X-Request-Id			"Server-generated request UUIDv7 when available"
 //	@Header			all					{string}	Cache-Control			"no-store"
@@ -68,26 +69,30 @@ func (h *PaymentIntentsHandler) PostHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		merchantID := middleware.MerchantIDFromContext(r.Context())
 		idempotencyKey := middleware.IdempotencyKeyFromContext(r.Context())
-		request, ok := modelbinding.BindJSON[models.CreatePaymentIntentRequest](w, r)
+		request, ok, err := modelbinding.BindJSON[models.CreatePaymentIntentRequest](w, r)
+		if err != nil {
+			h.logger.ErrorContext(r.Context(), "failed to write HTTP response", "error", err)
+			return
+		}
 		if !ok {
 			return
 		}
 		intent, conflict, err := h.service.CreatePaymentIntent(r.Context(), merchantID, idempotencyKey, *request)
 		if err != nil {
-			writePaymentIntentError(r.Context(), w, err)
+			h.writePaymentIntentError(r.Context(), w, err)
 			return
 		}
 		if conflict {
-			writePaymentIntentProblem(r.Context(), w, http.StatusConflict,
+			h.writePaymentIntentProblem(r.Context(), w, http.StatusConflict,
 				"The idempotency key was already used with different intent details.")
 			return
 		}
 		if intent == nil {
-			writePaymentIntentError(r.Context(), w, errors.New("creation returned no payment intent"))
+			h.writePaymentIntentError(r.Context(), w, errors.New("creation returned no payment intent"))
 			return
 		}
 		w.Header().Set("Location", "/api/PaymentIntents/"+intent.PaymentIntentID)
-		writePaymentIntentResponse(r.Context(), w, http.StatusCreated, intent)
+		h.writePaymentIntentResponse(r.Context(), w, http.StatusCreated, intent)
 	}
 }
 
@@ -128,7 +133,7 @@ func (h *PaymentIntentsHandler) PostHandler() http.HandlerFunc {
 //	@Failure		409					{object}	models.ProblemDetails	"Idempotency conflict, intent cannot be paid, or attempt is still Processing"
 //	@Failure		413					{object}	models.ProblemDetails	"Request body exceeds 1 MiB"
 //	@Failure		415					{object}	models.ProblemDetails	"Content-Type must be application/json"
-//	@Failure		429					{object}	models.ProblemDetails	"Global request limit exceeded"
+//	@Failure		429					{object}	models.ProblemDetails	"Global or merchant request limit exceeded"
 //	@Header			202					{string}	Location				"Relative payment-intent lookup URL, also returned on pending-verification replay"
 //	@Header			all					{string}	X-Request-Id			"Server-generated request UUIDv7 when available"
 //	@Header			all					{string}	Cache-Control			"no-store"
@@ -140,34 +145,39 @@ func (h *PaymentIntentsHandler) ConfirmHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		merchantID := middleware.MerchantIDFromContext(r.Context())
 		idempotencyKey := middleware.IdempotencyKeyFromContext(r.Context())
-		id, ok := paymentIntentID(w, r)
+		id, ok := h.paymentIntentID(w, r)
 		if !ok {
 			return
 		}
-		request, ok := modelbinding.BindJSON[models.ConfirmPaymentIntentRequest](w, r)
+		r = r.WithContext(context.WithValue(r.Context(), requestcontext.PaymentIntentIDKey{}, id))
+		request, ok, err := modelbinding.BindJSON[models.ConfirmPaymentIntentRequest](w, r)
+		if err != nil {
+			h.logger.ErrorContext(r.Context(), "failed to write HTTP response", "error", err)
+			return
+		}
 		if !ok {
 			return
 		}
 		intent, err := h.service.ConfirmPaymentIntent(r.Context(), merchantID, id, idempotencyKey, *request)
 		if err != nil {
-			writePaymentIntentError(r.Context(), w, err)
+			h.writePaymentIntentError(r.Context(), w, err)
 			return
 		}
 		if intent == nil {
-			writePaymentIntentError(r.Context(), w, errors.New("confirmation returned no payment intent"))
+			h.writePaymentIntentError(r.Context(), w, errors.New("confirmation returned no payment intent"))
 			return
 		}
 		switch intent.Status {
 		case models.PaymentIntentAuthorized, models.PaymentIntentDeclined:
-			writePaymentIntentResponse(r.Context(), w, http.StatusOK, intent)
+			h.writePaymentIntentResponse(r.Context(), w, http.StatusOK, intent)
 		case models.PaymentIntentPendingVerification:
 			w.Header().Set("Location", "/api/PaymentIntents/"+intent.PaymentIntentID)
-			writePaymentIntentResponse(r.Context(), w, http.StatusAccepted, intent)
+			h.writePaymentIntentResponse(r.Context(), w, http.StatusAccepted, intent)
 		case models.PaymentIntentProcessing:
-			writeAttemptProblem(r.Context(), w, http.StatusConflict,
+			h.writeAttemptProblem(r.Context(), w, http.StatusConflict,
 				"The bank transaction is already being processed.", intent)
 		default:
-			writePaymentIntentError(r.Context(), w, errors.New("unsupported payment intent status"))
+			h.writePaymentIntentError(r.Context(), w, errors.New("unsupported payment intent status"))
 		}
 	}
 }
@@ -189,7 +199,7 @@ func (h *PaymentIntentsHandler) ConfirmHandler() http.HandlerFunc {
 //	@Success		200				{object}	models.PaymentIntentResponse
 //	@Failure		401,403,500		{object}	models.ProblemDetails
 //	@Failure		404				{object}	models.ProblemDetails	"Intent ID is malformed, missing, or owned by another merchant"
-//	@Failure		429				{object}	models.ProblemDetails	"Global request limit exceeded"
+//	@Failure		429				{object}	models.ProblemDetails	"Global or merchant request limit exceeded"
 //	@Header			all				{string}	X-Request-Id			"Server-generated request UUIDv7 when available"
 //	@Header			all				{string}	Cache-Control			"no-store"
 //	@Header			all				{string}	Pragma					"no-cache"
@@ -200,54 +210,53 @@ func (h *PaymentIntentsHandler) GetHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		merchantID := middleware.MerchantIDFromContext(r.Context())
 		if err := r.Context().Err(); err != nil {
-			writePaymentIntentError(r.Context(), w, err)
+			h.writePaymentIntentError(r.Context(), w, err)
 			return
 		}
-		id, ok := paymentIntentID(w, r)
+		id, ok := h.paymentIntentID(w, r)
 		if !ok {
 			return
 		}
-		intent, err := h.service.GetPaymentIntent(merchantID, id)
+		r = r.WithContext(context.WithValue(r.Context(), requestcontext.PaymentIntentIDKey{}, id))
+		intent, err := h.service.GetPaymentIntent(r.Context(), merchantID, id)
 		if err != nil {
-			writePaymentIntentError(r.Context(), w, err)
+			h.writePaymentIntentError(r.Context(), w, err)
 			return
 		}
 		if intent == nil {
-			writePaymentIntentError(r.Context(), w, models.ErrPaymentIntentNotFound)
+			h.writePaymentIntentError(r.Context(), w, models.ErrPaymentIntentNotFound)
 			return
 		}
-		writePaymentIntentResponse(r.Context(), w, http.StatusOK, intent)
+		h.writePaymentIntentResponse(r.Context(), w, http.StatusOK, intent)
 	}
 }
 
-func paymentIntentID(w http.ResponseWriter, r *http.Request) (string, bool) {
+func (h *PaymentIntentsHandler) paymentIntentID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id, err := uuid.Parse(chi.URLParam(r, "paymentIntentId"))
 	if err != nil {
-		writePaymentIntentError(r.Context(), w, models.ErrPaymentIntentNotFound)
+		h.writePaymentIntentError(r.Context(), w, models.ErrPaymentIntentNotFound)
 		return "", false
 	}
 	return id.String(), true
 }
 
-func writePaymentIntentResponse(ctx context.Context, w http.ResponseWriter, status int, intent *models.PaymentIntentResponse) {
+func (h *PaymentIntentsHandler) writePaymentIntentResponse(ctx context.Context, w http.ResponseWriter, status int, intent *models.PaymentIntentResponse) {
 	requestID := middleware.GetRequestID(ctx)
 	intent.RequestID = &requestID
-	httpresponse.WriteJSON(w, status, "application/json", intent)
-}
-
-func writePaymentIntentProblem(ctx context.Context, w http.ResponseWriter, status int, detail string) {
-	httpresponse.WriteProblemDetails(w, models.ProblemDetails{
-		Status: status, Detail: detail, RequestID: middleware.GetRequestID(ctx),
-	})
-}
-
-func writePaymentIntentError(ctx context.Context, w http.ResponseWriter, err error) {
-	requestID := middleware.GetRequestID(ctx)
-	var validation *services.ValidationError
-	if errors.As(err, &validation) {
-		httpresponse.WriteProblem(w, http.StatusBadRequest, requestID, validation.Errors)
-		return
+	if err := httpresponse.WriteJSON(w, status, "application/json", intent); err != nil {
+		h.logger.ErrorContext(ctx, "failed to write HTTP response", "error", err)
 	}
+}
+
+func (h *PaymentIntentsHandler) writePaymentIntentProblem(ctx context.Context, w http.ResponseWriter, status int, detail string) {
+	if err := httpresponse.WriteProblemDetails(w, models.ProblemDetails{
+		Status: status, Detail: detail, RequestID: middleware.GetRequestID(ctx),
+	}); err != nil {
+		h.logger.ErrorContext(ctx, "failed to write HTTP response", "error", err)
+	}
+}
+
+func (h *PaymentIntentsHandler) writePaymentIntentError(ctx context.Context, w http.ResponseWriter, err error) {
 	status, detail := http.StatusInternalServerError, ""
 	switch {
 	case errors.Is(err, models.ErrPaymentIntentNotFound):
@@ -259,27 +268,30 @@ func writePaymentIntentError(ctx context.Context, w http.ResponseWriter, err err
 	case errors.Is(err, models.ErrInvalidCardToken):
 		status, detail = http.StatusBadRequest, "The card token is invalid or unavailable."
 	default:
-		log.Printf("Payment intent request failed (request_id=%s): %v", requestID, err)
+		h.logger.ErrorContext(ctx, "failed to process payment intent request", "error", err)
 	}
-	writePaymentIntentProblem(ctx, w, status, detail)
+	h.writePaymentIntentProblem(ctx, w, status, detail)
 }
 
-func writeAttemptProblem(ctx context.Context, w http.ResponseWriter, status int, detail string, intent *models.PaymentIntentResponse) {
+func (h *PaymentIntentsHandler) writeAttemptProblem(ctx context.Context, w http.ResponseWriter, status int, detail string, intent *models.PaymentIntentResponse) {
+	ctx = context.WithValue(ctx, requestcontext.PaymentIntentIDKey{}, intent.PaymentIntentID)
 	for _, transaction := range intent.BankTransactions {
 		intentStatus, err := transaction.Status.ToPaymentIntentStatus()
 		if err != nil {
-			writePaymentIntentError(ctx, w, err)
+			h.writePaymentIntentError(context.WithValue(ctx, requestcontext.BankTransactionIDKey{}, transaction.BankTransactionID), w, err)
 			return
 		}
 		if intentStatus != intent.Status {
 			continue
 		}
-		httpresponse.WriteProblemDetails(w, models.ProblemDetails{
+		if err := httpresponse.WriteProblemDetails(w, models.ProblemDetails{
 			Status: status, Detail: detail, RequestID: middleware.GetRequestID(ctx),
 			PaymentIntentID: intent.PaymentIntentID, BankTransactionID: transaction.BankTransactionID,
 			PaymentIntentStatus: intent.Status, BankTransactionStatus: transaction.Status,
-		})
+		}); err != nil {
+			h.logger.ErrorContext(ctx, "failed to write HTTP response", "error", err)
+		}
 		return
 	}
-	writePaymentIntentError(ctx, w, errors.New("payment intent has no matching active bank transaction"))
+	h.writePaymentIntentError(ctx, w, errors.New("payment intent has no matching active bank transaction"))
 }

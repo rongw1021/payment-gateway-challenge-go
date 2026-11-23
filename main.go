@@ -39,6 +39,9 @@ var (
 // @description				- POST bodies must be single JSON objects no larger than **1 MiB**.
 // @description				- Success responses use `application/json`; errors use `application/problem+json`.
 // @description				- Payment endpoints return a fresh `X-Request-Id` and disable response caching.
+// @description				- Payment intents include UTC `created_at` and `updated_at` timestamps. Reads and idempotent replays do not advance them.
+// @description				- Payment-intent changes are audited asynchronously. Webhook delivery is a logging-only placeholder; no merchant callback is sent.
+// @description				- Unexpected handler panics return generic **500 ProblemDetails** if no response has started; otherwise the connection or stream is aborted. A 500 is not proof of a bank decline and does not make a new payment submission safe.
 // @description
 // @description				### HTTP deadlines
 // @description				- Configurable server defaults: **5s** for headers, **15s** for headers and body, **30s** for response writes, and **60s** for idle keep-alive connections.
@@ -46,7 +49,9 @@ var (
 // @description				- The write deadline includes body reading and handler time. It must exceed the request-read budget plus the bank timeout; it does not cancel bank processing or prove that a payment failed.
 // @description
 // @description				### Rate limiting
-// @description				- A configurable global rolling limit defaults to **100 requests per second** per process.
+// @description				- A configurable global rolling limit defaults to **100 requests per second** per process, before authentication.
+// @description				- A separate merchant rolling limit defaults to **10 requests per second**, shared across that merchant's API keys and protected routes, after authentication and scope checks but before request validation.
+// @description				- Merchant-level rejections still consume global capacity. Both limits are per process, not distributed quotas.
 // @description				- `GET /ping` is exempt.
 // @description				- Excess requests return **429 Too Many Requests** with `Retry-After: 1`.
 // @BasePath					/
@@ -96,13 +101,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure bank simulator: %w", err)
 	}
+	defer bank.CloseIdleConnections()
 	cronOptions := backgroundservices.CronJobOptions{
 		SweepInterval:                      cfg.Reconciliation.SweepInterval,
 		BankTransactionStatusUpdateTimeout: cfg.Reconciliation.BankTransactionStatusUpdateTimeout,
 		BatchSize:                          int(cfg.Reconciliation.BatchSize),
 	}
-	api, err := api.New(cfg.Authentication.APIKeys, bank, changedatacapture.NewInMemory(), cronOptions,
-		int(cfg.RateLimit.RequestsPerSecond))
+	api, err := api.New(cfg.Authentication.APIKeys, bank, changedatacapture.NewStreams(), cronOptions,
+		int(cfg.RateLimit.GlobalRequestsPerSecond), int(cfg.RateLimit.PerMerchantRequestsPerSecond), logger)
 	if err != nil {
 		return err
 	}

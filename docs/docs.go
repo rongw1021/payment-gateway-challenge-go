@@ -192,7 +192,7 @@ const docTemplate = `{
                         }
                     },
                     "429": {
-                        "description": "Global request limit exceeded",
+                        "description": "Global or merchant request limit exceeded",
                         "schema": {
                             "$ref": "#/definitions/models.ProblemDetails"
                         },
@@ -449,7 +449,7 @@ const docTemplate = `{
                         }
                     },
                     "429": {
-                        "description": "Global request limit exceeded",
+                        "description": "Global or merchant request limit exceeded",
                         "schema": {
                             "$ref": "#/definitions/models.ProblemDetails"
                         },
@@ -608,7 +608,7 @@ const docTemplate = `{
                         }
                     },
                     "429": {
-                        "description": "Global request limit exceeded",
+                        "description": "Global or merchant request limit exceeded",
                         "schema": {
                             "$ref": "#/definitions/models.ProblemDetails"
                         },
@@ -913,7 +913,7 @@ const docTemplate = `{
                         }
                     },
                     "429": {
-                        "description": "Global request limit exceeded",
+                        "description": "Global or merchant request limit exceeded",
                         "schema": {
                             "$ref": "#/definitions/models.ProblemDetails"
                         },
@@ -1177,10 +1177,12 @@ const docTemplate = `{
             "required": [
                 "amount",
                 "bank_transactions",
+                "created_at",
                 "currency",
                 "payment_intent_id",
                 "request_id",
-                "status"
+                "status",
+                "updated_at"
             ],
             "properties": {
                 "amount": {
@@ -1196,6 +1198,10 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/models.BankTransactionResponse"
                     }
+                },
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time"
                 },
                 "currency": {
                     "type": "string",
@@ -1216,6 +1222,11 @@ const docTemplate = `{
                 },
                 "status": {
                     "$ref": "#/definitions/models.PaymentIntentStatus"
+                },
+                "updated_at": {
+                    "description": "UTC time of the most recent intent status change; initially equal to created_at.",
+                    "type": "string",
+                    "format": "date-time"
                 }
             }
         },
@@ -1302,7 +1313,7 @@ var SwaggerInfo = &swag.Spec{
 	BasePath:         "/",
 	Schemes:          []string{},
 	Title:            "Payment Gateway Challenge Go",
-	Description:      "Merchant-scoped card tokenization and payment intents with **idempotent confirmation** and bank transaction history.\n\n### Authentication\n- Send `Authorization: Bearer sk_<payload>` on card-token and payment-intent requests.\n- Use an **API key** with the required endpoint scope.\n\n### Requests and responses\n- POST bodies must be single JSON objects no larger than **1 MiB**.\n- Success responses use `application/json`; errors use `application/problem+json`.\n- Payment endpoints return a fresh `X-Request-Id` and disable response caching.\n\n### HTTP deadlines\n- Configurable server defaults: **5s** for headers, **15s** for headers and body, **30s** for response writes, and **60s** for idle keep-alive connections.\n- Slow POST body uploads return **408 Request Timeout** before payment processing. Incomplete headers or stalled response readers may result in a closed connection without a JSON response.\n- The write deadline includes body reading and handler time. It must exceed the request-read budget plus the bank timeout; it does not cancel bank processing or prove that a payment failed.\n\n### Rate limiting\n- A configurable global rolling limit defaults to **100 requests per second** per process.\n- `GET /ping` is exempt.\n- Excess requests return **429 Too Many Requests** with `Retry-After: 1`.",
+	Description:      "Merchant-scoped card tokenization and payment intents with **idempotent confirmation** and bank transaction history.\n\n### Authentication\n- Send `Authorization: Bearer sk_<payload>` on card-token and payment-intent requests.\n- Use an **API key** with the required endpoint scope.\n\n### Requests and responses\n- POST bodies must be single JSON objects no larger than **1 MiB**.\n- Success responses use `application/json`; errors use `application/problem+json`.\n- Payment endpoints return a fresh `X-Request-Id` and disable response caching.\n- Payment intents include UTC `created_at` and `updated_at` timestamps. Reads and idempotent replays do not advance them.\n- Payment-intent changes are audited asynchronously. Webhook delivery is a logging-only placeholder; no merchant callback is sent.\n- Unexpected handler panics return generic **500 ProblemDetails** if no response has started; otherwise the connection or stream is aborted. A 500 is not proof of a bank decline and does not make a new payment submission safe.\n\n### HTTP deadlines\n- Configurable server defaults: **5s** for headers, **15s** for headers and body, **30s** for response writes, and **60s** for idle keep-alive connections.\n- Slow POST body uploads return **408 Request Timeout** before payment processing. Incomplete headers or stalled response readers may result in a closed connection without a JSON response.\n- The write deadline includes body reading and handler time. It must exceed the request-read budget plus the bank timeout; it does not cancel bank processing or prove that a payment failed.\n\n### Rate limiting\n- A configurable global rolling limit defaults to **100 requests per second** per process, before authentication.\n- A separate merchant rolling limit defaults to **10 requests per second**, shared across that merchant's API keys and protected routes, after authentication and scope checks but before request validation.\n- Merchant-level rejections still consume global capacity. Both limits are per process, not distributed quotas.\n- `GET /ping` is exempt.\n- Excess requests return **429 Too Many Requests** with `Retry-After: 1`.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 	LeftDelim:        "{{",

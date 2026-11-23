@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -48,6 +49,7 @@ func TestClientSendsBankContractAndAcceptsExplicitDecisions(t *testing.T) {
 			defer server.Close()
 			client, err := NewClient(server.URL+"/bank/", 5*time.Second)
 			require.NoError(t, err)
+			t.Cleanup(client.CloseIdleConnections)
 
 			decision, err := client.ProcessBankTransaction(context.Background(), bankRequest)
 
@@ -321,3 +323,104 @@ func TestClientConfigurationValidation(t *testing.T) {
 }
 
 func stringPointer(value string) *string { return &value }
+
+func TestClientLimitsConnectionsAndReusesPool(t *testing.T) {
+	entered := make(chan struct{}, 6)
+	release := make(chan struct{})
+	var connections, requests atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		entered <- struct{}{}
+		select {
+		case <-release:
+			_, _ = io.WriteString(w, `{"authorized":false}`)
+		case <-r.Context().Done():
+		}
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+	client, err := NewClient(server.URL+"/", 5*time.Second)
+	require.NoError(t, err)
+	defer client.CloseIdleConnections()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 6)
+	send := func() {
+		_, err := client.ProcessBankTransaction(ctx, bankRequest)
+		done <- err
+	}
+	for i := 0; i < 5; i++ {
+		go send()
+	}
+	for i := 0; i < 5; i++ {
+		select {
+		case <-entered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("five requests did not reach the bank")
+		}
+	}
+	assert.EqualValues(t, 5, connections.Load())
+	go send()
+	select {
+	case <-entered:
+		t.Fatal("a sixth connection exceeded the pool limit")
+	case <-time.After(100 * time.Millisecond):
+	}
+	waitCtx, cancelWait := context.WithTimeout(ctx, 100*time.Millisecond)
+	_, err = client.ProcessBankTransaction(waitCtx, bankRequest)
+	cancelWait()
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.EqualValues(t, 5, requests.Load(), "canceled pool waiter must not submit to the bank")
+	close(release)
+	for i := 0; i < 6; i++ {
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(3 * time.Second):
+			t.Fatal("queued requests did not finish")
+		}
+	}
+	assert.EqualValues(t, 6, requests.Load())
+	assert.EqualValues(t, 5, connections.Load(), "the queued request must reuse a pooled connection")
+	for i := 0; i < 2; i++ {
+		_, err := client.ProcessBankTransaction(ctx, bankRequest)
+		require.NoError(t, err)
+	}
+	assert.EqualValues(t, 5, connections.Load())
+}
+
+func TestClientDoesNotResubmitWhenBankDropsResponse(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Error(err)
+			return
+		}
+		if calls.Add(1) == 1 {
+			_, _ = io.WriteString(w, `{"authorized":false}`)
+			return
+		}
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		conn.Close()
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL+"/", time.Second)
+	require.NoError(t, err)
+	defer client.CloseIdleConnections()
+	_, err = client.ProcessBankTransaction(context.Background(), bankRequest)
+	require.NoError(t, err)
+	_, err = client.ProcessBankTransaction(context.Background(), bankRequest)
+	var failure *Failure
+	require.ErrorAs(t, err, &failure)
+	assert.Equal(t, NetworkFailure, failure.Kind)
+	assert.EqualValues(t, 2, calls.Load())
+}

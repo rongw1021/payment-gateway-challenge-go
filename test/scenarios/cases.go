@@ -104,6 +104,8 @@ func (c *client) checkConfirmation(t *testing.T, result, current response, outco
 	assert.Equal(t, current.string(t, "currency"), result.string(t, "currency"))
 	assert.JSONEq(t, string(current.body["amount"]), string(result.body["amount"]))
 	assert.JSONEq(t, string(current.body["bank_transactions"]), string(result.body["bank_transactions"]))
+	assert.Equal(t, current.string(t, "created_at"), result.string(t, "created_at"))
+	assert.Equal(t, current.string(t, "updated_at"), result.string(t, "updated_at"))
 	result.transactions(t)
 	if outcome.status == http.StatusAccepted {
 		assert.Equal(t, "/api/PaymentIntents/"+current.string(t, "payment_intent_id"), result.headers.Get("Location"))

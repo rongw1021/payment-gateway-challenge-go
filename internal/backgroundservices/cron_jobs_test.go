@@ -15,12 +15,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func workerRepository(t *testing.T) (*repository.PaymentIntentsRepository, *changedatacapture.InMemory, *atomic.Int64) {
+func workerRepository(t *testing.T) (*repository.PaymentIntentsRepository, *changedatacapture.InMemory[models.BankTransactionChangeEvent], *atomic.Int64) {
 	t.Helper()
 	clock := &atomic.Int64{}
 	clock.Store(time.Date(2030, 4, 10, 12, 0, 0, 0, time.UTC).UnixNano())
-	capture := changedatacapture.NewInMemory()
-	repo, err := repository.NewPaymentIntentsRepository(capture, func() time.Time { return time.Unix(0, clock.Load()).UTC() })
+	capture := changedatacapture.NewInMemory[models.BankTransactionChangeEvent]()
+	repo, err := repository.NewPaymentIntentsRepository(capture, changedatacapture.NewInMemory[models.PaymentIntentChangeEvent](), func() time.Time { return time.Unix(0, clock.Load()).UTC() })
 	require.NoError(t, err)
 	return repo, capture, clock
 }
@@ -30,7 +30,7 @@ func workerTransaction(t *testing.T, repo *repository.PaymentIntentsRepository) 
 	key, err := identifiers.NewUUID()
 	require.NoError(t, err)
 	amount := int32(100)
-	intent, _, err := repo.CreatePaymentIntent("merchant", key, models.CreatePaymentIntentRequest{Currency: "GBP", Amount: &amount})
+	intent, _, err := repo.CreatePaymentIntent("merchant", key, "creation-request", models.CreatePaymentIntentRequest{Currency: "GBP", Amount: &amount})
 	require.NoError(t, err)
 	_, transaction, _, err := repo.CreateBankTransaction("merchant", intent.PaymentIntentID, key,
 		"11111111-1111-4111-8111-111111111111",
