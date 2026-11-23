@@ -999,11 +999,11 @@ const docTemplate = `{
             "required": [
                 "bank_transaction_id",
                 "card_number_last_four",
-                "completed_at",
                 "created_at",
                 "expiry_month",
                 "expiry_year",
-                "status"
+                "status",
+                "updated_at"
             ],
             "properties": {
                 "bank_transaction_id": {
@@ -1015,12 +1015,6 @@ const docTemplate = `{
                     "maxLength": 4,
                     "minLength": 4,
                     "example": "0007"
-                },
-                "completed_at": {
-                    "description": "Null while Scheduled, including an in-flight bank request.",
-                    "type": "string",
-                    "format": "date-time",
-                    "x-nullable": true
                 },
                 "created_at": {
                     "type": "string",
@@ -1040,6 +1034,11 @@ const docTemplate = `{
                 },
                 "status": {
                     "$ref": "#/definitions/models.BankTransactionStatus"
+                },
+                "updated_at": {
+                    "description": "UTC time of the most recent attempt status change; initially equal to created_at.",
+                    "type": "string",
+                    "format": "date-time"
                 }
             }
         },

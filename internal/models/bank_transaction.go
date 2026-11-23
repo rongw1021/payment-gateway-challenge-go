@@ -47,19 +47,20 @@ func (s BankTransactionStatus) ToPaymentIntentStatus() (PaymentIntentStatus, err
 }
 
 type BankTransaction struct {
-	BankTransactionID    string                `json:"bank_transaction_id" format:"uuid"`
-	PaymentIntentID      string                `json:"payment_intent_id" format:"uuid"`
-	MerchantID           string                `json:"merchant_id"`
-	Status               BankTransactionStatus `json:"status"`
-	CardNumberLastFour   string                `json:"card_number_last_four"`
-	ExpiryMonth          int                   `json:"expiry_month"`
-	ExpiryYear           int                   `json:"expiry_year"`
-	CreatedAt            time.Time             `json:"created_at"`
-	IdempotencyKey       string                `json:"-"`
-	RequestFingerprint   string                `json:"-"`
-	OriginatingRequestID string                `json:"-"`
-	CompletedAt          *time.Time            `json:"completed_at"`
-	AuthorizationCode    *string               `json:"authorization_code"`
+	BankTransactionID  string                `json:"bank_transaction_id" format:"uuid"`
+	PaymentIntentID    string                `json:"payment_intent_id" format:"uuid"`
+	MerchantID         string                `json:"merchant_id"`
+	Status             BankTransactionStatus `json:"status"`
+	CardNumberLastFour string                `json:"card_number_last_four"`
+	ExpiryMonth        int                   `json:"expiry_month"`
+	ExpiryYear         int                   `json:"expiry_year"`
+	CreatedAt          time.Time             `json:"created_at"`
+	// UpdatedAt changes only on status transitions, not reads or replays.
+	UpdatedAt            time.Time `json:"updated_at"`
+	IdempotencyKey       string    `json:"-"`
+	RequestFingerprint   string    `json:"-"`
+	OriginatingRequestID string    `json:"-"`
+	AuthorizationCode    *string   `json:"authorization_code"`
 }
 
 func (b BankTransaction) String() string {
@@ -74,6 +75,6 @@ type BankTransactionResponse struct {
 	ExpiryMonth        int                   `json:"expiry_month" binding:"required" minimum:"1" maximum:"12" example:"4"`
 	ExpiryYear         int                   `json:"expiry_year" binding:"required" minimum:"1" maximum:"9999" example:"2099"`
 	CreatedAt          time.Time             `json:"created_at" binding:"required" format:"date-time"`
-	// Null while Scheduled, including an in-flight bank request.
-	CompletedAt *time.Time `json:"completed_at" binding:"required" format:"date-time" extensions:"x-nullable"`
+	// UTC time of the most recent attempt status change; initially equal to created_at.
+	UpdatedAt time.Time `json:"updated_at" binding:"required" format:"date-time"`
 }

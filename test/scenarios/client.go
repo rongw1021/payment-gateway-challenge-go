@@ -44,13 +44,13 @@ type response struct {
 }
 
 type transaction struct {
-	ID        string     `json:"bank_transaction_id"`
-	Status    string     `json:"status"`
-	LastFour  string     `json:"card_number_last_four"`
-	Month     int        `json:"expiry_month"`
-	Year      int        `json:"expiry_year"`
-	CreatedAt time.Time  `json:"created_at"`
-	Completed *time.Time `json:"completed_at"`
+	ID        string    `json:"bank_transaction_id"`
+	Status    string    `json:"status"`
+	LastFour  string    `json:"card_number_last_four"`
+	Month     int       `json:"expiry_month"`
+	Year      int       `json:"expiry_year"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func newClient(t *testing.T, address string, keys Credentials) *client {
@@ -201,12 +201,14 @@ func (r response) transactions(t *testing.T) []transaction {
 		checkUUID(t, item.ID)
 		assert.Regexp(t, "^[0-9]{4}$", item.LastFour)
 		assert.False(t, item.CreatedAt.IsZero())
+		assert.False(t, item.UpdatedAt.IsZero())
+		assert.False(t, item.UpdatedAt.Before(item.CreatedAt))
+		assert.NotContains(t, raw[i], "completed_at")
 		for _, field := range []string{"card_number", "cvv", "card_token", "merchant_id", "idempotency_key", "request_fingerprint", "authorization_code"} {
 			assert.NotContains(t, raw[i], field)
 		}
-		if item.Status != "Scheduled" {
-			require.NotNil(t, item.Completed)
-			assert.False(t, item.Completed.Before(item.CreatedAt))
+		if item.Status == "Scheduled" {
+			assert.Equal(t, item.CreatedAt, item.UpdatedAt)
 		}
 	}
 	return result

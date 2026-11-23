@@ -95,9 +95,10 @@ func TestSwaggerDocumentsCurrentHTTPContract(t *testing.T) {
 	assert.Equal(t, "date-time", token.Properties["expires_at"].Format)
 	transaction := document.Definitions["models.BankTransactionResponse"]
 	assert.Equal(t, "date-time", transaction.Properties["created_at"].Format)
-	assert.Equal(t, "date-time", transaction.Properties["completed_at"].Format)
-	assert.True(t, transaction.Properties["completed_at"].Nullable)
-	assert.Contains(t, transaction.Required, "completed_at", "the field is present even when its value is null")
+	assert.Equal(t, "date-time", transaction.Properties["updated_at"].Format)
+	assert.False(t, transaction.Properties["updated_at"].Nullable)
+	assert.Contains(t, transaction.Required, "updated_at")
+	assert.NotContains(t, transaction.Properties, "completed_at")
 	intent := document.Definitions["models.PaymentIntentResponse"]
 	for _, field := range []string{"created_at", "updated_at"} {
 		assert.Contains(t, intent.Required, field)

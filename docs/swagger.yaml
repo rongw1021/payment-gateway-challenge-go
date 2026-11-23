@@ -18,11 +18,6 @@ definitions:
         maxLength: 4
         minLength: 4
         type: string
-      completed_at:
-        description: Null while Scheduled, including an in-flight bank request.
-        format: date-time
-        type: string
-        x-nullable: true
       created_at:
         format: date-time
         type: string
@@ -38,14 +33,19 @@ definitions:
         type: integer
       status:
         $ref: '#/definitions/models.BankTransactionStatus'
+      updated_at:
+        description: UTC time of the most recent attempt status change; initially
+          equal to created_at.
+        format: date-time
+        type: string
     required:
     - bank_transaction_id
     - card_number_last_four
-    - completed_at
     - created_at
     - expiry_month
     - expiry_year
     - status
+    - updated_at
     type: object
   models.BankTransactionStatus:
     enum:

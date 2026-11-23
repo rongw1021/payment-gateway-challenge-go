@@ -300,11 +300,14 @@ card snapshot contains neither PAN/CVV nor the card token.
 | `ExpiryMonth` | `int` | Expiry month copied from the consumed token's card details. | Yes |
 | `ExpiryYear` | `int` | Expiry year copied from the consumed token's card details. | Yes |
 | `CreatedAt` | `time.Time` | UTC time the attempt was reserved; also used to detect locally stalled attempts. | Yes |
+| `UpdatedAt` | `time.Time` | UTC time of the latest attempt status change; initially equals `CreatedAt`, including while `Scheduled`. Reads and replays leave it unchanged. | Yes |
 | `IdempotencyKey` | `string` | Merchant-scoped confirmation idempotency key; matching replays reuse this attempt rather than submitting another bank request. | No |
 | `RequestFingerprint` | `string` | HMAC-SHA256 fingerprint binding the confirmation to its intent ID and card token; detects conflicting reuse of the confirmation key. | No |
 | `OriginatingRequestID` | `string` | Identifies the confirmation request that first reserved the attempt; retained for correlation, including subsequent change events. | No |
-| `CompletedAt` | `*time.Time` | Nil while `Scheduled`; otherwise the UTC time the gateway recorded the latest outcome, including uncertainty or a later refinement. It is not a settlement timestamp. | Yes, nullable |
 | `AuthorizationCode` | `*string` | Optional bank-supplied code; a nonblank value is required for a successful authorization. Retained internally, not returned to the merchant. | No |
+
+The public bank-transaction timestamp is non-null `updated_at`, replacing the
+earlier nullable `completed_at` field.
 
 The HTTP response also includes `request_id`, identifying the current request.
 It is response metadata, not a payment-intent field, and is distinct from the
@@ -320,6 +323,24 @@ and supports retries before payment submission.
 confirmation idempotency key. The gateway reserves an attempt, calls the bank, and
 records the result. Retrieval requests also go through the merchant backend.
 This is not an authorization/capture split or a distributed two-phase commit.
+
+**Why separate the steps?** The split separates checkout preparation from a bank
+authorization attempt:
+
+- **Stable payment identity:** the merchant fixes the amount and currency and
+  obtains an intent ID independently of card collection or bank availability.
+- **Independent retries:** creation and confirmation have separate idempotency
+  keys, so retrying checkout setup does not itself submit a payment, while a
+  matching confirmation replay reuses the existing attempt.
+- **One payment, multiple attempts:** after a definitive decline, the merchant
+  can confirm the same intent with a new card token and key, retaining the payment
+  identity and complete history. Processing, authorized, and uncertain outcomes
+  still block new attempts.
+
+This is a design choice rather than a requirement of the assessment. It adds an
+API call and allows intents that are never confirmed; duplicate-submission
+protection comes from the idempotency and state checks, not from having two
+endpoints alone.
 
 For a new confirmation:
 
@@ -386,8 +407,11 @@ this transition, but there is no bank verification endpoint or webhook to fetch
 such a result independently. Definitive outcomes of an individual bank transaction
 cannot be changed into another outcome.
 
-`CompletedAt` records a gateway outcome transition, including uncertain outcomes.
-It is not proof of settlement or proof that the bank did not process a request.
+The bank transaction's `UpdatedAt` starts at `CreatedAt` and changes on status
+transitions, including uncertain outcomes and later refinements. A changed
+uncertainty reason can update the transaction while the intent remains
+`PendingVerification` with its own `UpdatedAt` unchanged. Neither timestamp proves
+settlement or that the bank did not process a request.
 
 ### Idempotency and replay semantics
 
@@ -514,7 +538,7 @@ attempt models this missing status update. The background sweep detects such
 records so that they do not remain indefinitely in progress.
 
 The timeout worker runs a sweep on startup and then periodically. An attempt is
-eligible when it is still `Scheduled`, has no completion time, and:
+eligible when it is still `Scheduled` and:
 
 ```text
 current time - creation time >= configured status-update timeout
@@ -933,9 +957,10 @@ $createKey = [guid]::NewGuid().ToString()
 $confirmKey = [guid]::NewGuid().ToString()
 ```
 
-The exchanges below were captured from the local Docker stack. Connection
-diagnostics are omitted and JSON is formatted for readability; `Content-Length`
-reflects the original compact JSON. Your IDs and timestamps will differ. Use the
+The examples below are based on a recorded local Docker walkthrough and have been
+updated to the current response schema. Connection diagnostics are omitted and
+JSON is formatted for readability; `Content-Length` reflects compact JSON.
+Your IDs and timestamps will differ. Use the
 variables populated by the commands, not the captured IDs, and confirm within the
 card token's 15-minute lifetime.
 
@@ -975,7 +1000,7 @@ Content-Length: 83
 }
 ```
 
-**Captured response:**
+**Example response:**
 
 ```http
 HTTP/1.1 200 OK
@@ -1029,7 +1054,7 @@ Content-Length: 31
 }
 ```
 
-**Captured response:**
+**Example response:**
 
 ```http
 HTTP/1.1 201 Created
@@ -1095,7 +1120,7 @@ Content-Length: 53
 }
 ```
 
-**Captured response:**
+**Example response:**
 
 ```http
 HTTP/1.1 200 OK
@@ -1104,7 +1129,7 @@ Content-Type: application/json
 Pragma: no-cache
 X-Request-Id: 01a20703-ddb3-7532-ba5b-96598bf52047
 Date: Mon, 23 Nov 2026 06:07:03 GMT
-Content-Length: 522
+Content-Length: 520
 
 {
   "payment_intent_id": "01a20703-dc9c-7416-8d35-d5b79916aa7f",
@@ -1121,7 +1146,7 @@ Content-Length: 522
       "expiry_month": 12,
       "expiry_year": 2099,
       "created_at": "2026-11-23T06:07:03.603545518Z",
-      "completed_at": "2026-11-23T06:07:03.61232233Z"
+      "updated_at": "2026-11-23T06:07:03.61232233Z"
     }
   ],
   "request_id": "01a20703-ddb3-7532-ba5b-96598bf52047"
@@ -1156,7 +1181,7 @@ Accept: */*
 Authorization: Bearer sk_development1
 ```
 
-**Captured response:**
+**Example response:**
 
 ```http
 HTTP/1.1 200 OK
@@ -1165,7 +1190,7 @@ Content-Type: application/json
 Pragma: no-cache
 X-Request-Id: 01a20703-deb1-752a-8d49-f76e0a315e71
 Date: Mon, 23 Nov 2026 06:07:03 GMT
-Content-Length: 522
+Content-Length: 520
 
 {
   "payment_intent_id": "01a20703-dc9c-7416-8d35-d5b79916aa7f",
@@ -1182,7 +1207,7 @@ Content-Length: 522
       "expiry_month": 12,
       "expiry_year": 2099,
       "created_at": "2026-11-23T06:07:03.603545518Z",
-      "completed_at": "2026-11-23T06:07:03.61232233Z"
+      "updated_at": "2026-11-23T06:07:03.61232233Z"
     }
   ],
   "request_id": "01a20703-deb1-752a-8d49-f76e0a315e71"

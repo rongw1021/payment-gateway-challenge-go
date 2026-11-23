@@ -53,6 +53,7 @@ func TestReconciliationLogsEveryChangeAndWarnsOnlyOnVerificationTransitions(t *t
 		t.Run(string(failure), func(t *testing.T) {
 			repo, capture, clock := workerRepository(t)
 			transaction := workerTransaction(t, repo)
+			clock.Add(int64(time.Second))
 			_, err := repo.CompleteBankTransaction("merchant", transaction.BankTransactionID, failure, nil)
 			require.NoError(t, err)
 			require.NoError(t, capture.Produce(models.BankTransactionChangeEvent{
@@ -116,6 +117,7 @@ func TestReconciliationLogsEveryChangeAndWarnsOnlyOnVerificationTransitions(t *t
 					assert.Equal(t, transaction.ExpiryMonth, event.BankTransaction.ExpiryMonth)
 					assert.Equal(t, transaction.ExpiryYear, event.BankTransaction.ExpiryYear)
 					assert.Equal(t, transaction.CreatedAt, event.BankTransaction.CreatedAt)
+					assert.Equal(t, transaction.CreatedAt, event.BankTransaction.UpdatedAt)
 					assert.Equal(t, models.BankTransactionScheduled, event.BankTransaction.Status)
 				} else {
 					assert.Equal(t, "banktransaction.updated", entry["event_type"])
@@ -125,7 +127,7 @@ func TestReconciliationLogsEveryChangeAndWarnsOnlyOnVerificationTransitions(t *t
 						assert.JSONEq(t, `"[REDACTED]"`, string(event.Changes[0].NewValue))
 					} else {
 						require.GreaterOrEqual(t, len(event.Changes), 2)
-						assert.Equal(t, "CompletedAt", event.Changes[1].FieldName)
+						assert.Equal(t, "UpdatedAt", event.Changes[1].FieldName)
 						assert.NotEmpty(t, event.Changes[1].NewValue)
 					}
 				}
@@ -173,7 +175,7 @@ func TestReconciliationExportsSerializedAuditWithoutMutatingEvent(t *testing.T) 
 		PaymentIntentID: "intent", BankTransactionID: "transaction", Sequence: 2,
 		Changes: []models.BankTransactionFieldChange{
 			{FieldName: "Status", OriginalValue: json.RawMessage(`"Scheduled"`), NewValue: json.RawMessage(`"Authorized"`)},
-			{FieldName: "CompletedAt", OriginalValue: json.RawMessage(`null`), NewValue: json.RawMessage(`"2030-04-01T12:00:00Z"`)},
+			{FieldName: "UpdatedAt", OriginalValue: json.RawMessage(`"2030-04-01T11:59:59Z"`), NewValue: json.RawMessage(`"2030-04-01T12:00:00Z"`)},
 			{FieldName: "AuthorizationCode", OriginalValue: json.RawMessage(`null`), NewValue: json.RawMessage(`"private-bank-code"`)},
 		},
 	}
@@ -230,14 +232,14 @@ func TestReconciliationOmitsUnavailableIDsAndRedactsUnknownChanges(t *testing.T)
 	assert.JSONEq(t, `"[REDACTED]"`, string(event.Changes[0].NewValue))
 }
 
-func TestReconciliationRejectsMalformedCompletionDeltaWithoutLogging(t *testing.T) {
+func TestReconciliationRejectsMalformedTimestampDeltaWithoutLogging(t *testing.T) {
 	entries := make(logEntries, 1)
 	service, err := NewAuditAndReconciliationService(changedatacapture.NewInMemory[models.BankTransactionChangeEvent](), logging.NewConsole(entries))
 	require.NoError(t, err)
 	err = service.audit(context.Background(), models.BankTransactionChangeEvent{
 		EventType: models.BankTransactionUpdated,
 		Changes: []models.BankTransactionFieldChange{{
-			FieldName: "CompletedAt", OriginalValue: json.RawMessage(`null`), NewValue: json.RawMessage(`{`),
+			FieldName: "UpdatedAt", OriginalValue: json.RawMessage(`"2030-04-01T12:00:00Z"`), NewValue: json.RawMessage(`{`),
 		}},
 	})
 	require.ErrorContains(t, err, "serialize bank transaction audit event")
@@ -283,7 +285,7 @@ func TestReconcileChecksUpdatedStatusBeforeWarning(t *testing.T) {
 		invalid   bool
 	}{
 		{"created", models.BankTransactionCreated, "Status", json.RawMessage(`"RequestTimeout"`), false, false},
-		{"non-status update", models.BankTransactionUpdated, "CompletedAt", json.RawMessage(`null`), false, false},
+		{"non-status update", models.BankTransactionUpdated, "UpdatedAt", json.RawMessage(`"2030-04-01T12:00:00Z"`), false, false},
 		{"authorized", models.BankTransactionUpdated, "Status", json.RawMessage(`"Authorized"`), false, false},
 		{"declined", models.BankTransactionUpdated, "Status", json.RawMessage(`"Declined"`), false, false},
 		{"requires verification", models.BankTransactionUpdated, "Status", json.RawMessage(`"RequestTimeout"`), true, false},
@@ -319,7 +321,7 @@ func TestBankAuditFailureStopsBeforeReconciliation(t *testing.T) {
 		EventType: models.BankTransactionUpdated,
 		Changes: []models.BankTransactionFieldChange{
 			{FieldName: "Status", OriginalValue: json.RawMessage(`"Scheduled"`), NewValue: json.RawMessage(`"RequestTimeout"`)},
-			{FieldName: "CompletedAt", OriginalValue: json.RawMessage(`null`), NewValue: json.RawMessage(`{`)},
+			{FieldName: "UpdatedAt", OriginalValue: json.RawMessage(`"2030-04-01T12:00:00Z"`), NewValue: json.RawMessage(`{`)},
 		},
 	}))
 	entries := make(logEntries, 2)

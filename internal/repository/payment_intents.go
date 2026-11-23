@@ -129,10 +129,11 @@ func (r *PaymentIntentsRepository) CreateBankTransaction(
 	}
 	// Detach the suffix so stored records do not retain the full PAN's backing string.
 	lastFour := strings.Clone(card.CardNumber[len(card.CardNumber)-4:])
+	now := r.now().UTC()
 	transaction := models.BankTransaction{
 		BankTransactionID: id, PaymentIntentID: paymentIntentID, MerchantID: merchantID,
 		Status: models.BankTransactionScheduled, CardNumberLastFour: lastFour,
-		ExpiryMonth: card.ExpiryMonth, ExpiryYear: card.ExpiryYear, CreatedAt: r.now().UTC(),
+		ExpiryMonth: card.ExpiryMonth, ExpiryYear: card.ExpiryYear, CreatedAt: now, UpdatedAt: now,
 		IdempotencyKey: idempotencyKey, RequestFingerprint: fingerprint, OriginatingRequestID: originatingRequestID,
 	}
 	r.bankTransactions = append(r.bankTransactions, transaction)
@@ -188,14 +189,14 @@ func (r *PaymentIntentsRepository) completeBankTransactionLocked(merchantID, tra
 	completed.Status = status
 	completed.AuthorizationCode = clonePointer(authorizationCode)
 	now := r.now().UTC()
-	completed.CompletedAt = &now
+	completed.UpdatedAt = now
 	change := transactionChange(completed, models.BankTransactionUpdated)
 	for _, field := range []struct {
 		name          string
 		before, after interface{}
 	}{
 		{"Status", original.Status, completed.Status},
-		{"CompletedAt", original.CompletedAt, completed.CompletedAt},
+		{"UpdatedAt", original.UpdatedAt, completed.UpdatedAt},
 		{"AuthorizationCode", original.AuthorizationCode, completed.AuthorizationCode},
 	} {
 		before, err := json.Marshal(field.before)
@@ -283,7 +284,7 @@ func (r *PaymentIntentsRepository) GetTimedOutBankTransactions(cutoff time.Time,
 	defer r.mu.Unlock()
 	transactions := make([]models.BankTransaction, 0)
 	for _, transaction := range r.bankTransactions {
-		if transaction.Status == models.BankTransactionScheduled && transaction.CompletedAt == nil && !transaction.CreatedAt.After(cutoff) {
+		if transaction.Status == models.BankTransactionScheduled && !transaction.CreatedAt.After(cutoff) {
 			transactions = append(transactions, cloneBankTransaction(transaction))
 		}
 	}
@@ -307,7 +308,7 @@ func (r *PaymentIntentsRepository) TryMarkTimedOutBankTransaction(merchantID, tr
 		return false, ErrBankTransactionNotFound
 	}
 	transaction := r.bankTransactions[index]
-	if transaction.Status != models.BankTransactionScheduled || transaction.CompletedAt != nil || transaction.CreatedAt.After(cutoff) {
+	if transaction.Status != models.BankTransactionScheduled || transaction.CreatedAt.After(cutoff) {
 		return false, nil
 	}
 	intentIndex := r.findPaymentIntent(merchantID, transaction.PaymentIntentID)
@@ -394,7 +395,6 @@ func clonePointer[T any](value *T) *T {
 }
 
 func cloneBankTransaction(transaction models.BankTransaction) models.BankTransaction {
-	transaction.CompletedAt = clonePointer(transaction.CompletedAt)
 	transaction.AuthorizationCode = clonePointer(transaction.AuthorizationCode)
 	return transaction
 }

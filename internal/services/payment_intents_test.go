@@ -234,7 +234,7 @@ func TestPaymentIntentConfirmationUsesStoredDetailsAndReplaysAfterTokenExpiry(t 
 			assert.Equal(t, confirmed, current)
 			assert.Equal(t, current, f.create(t, "merchant", "private-create"))
 			require.Len(t, current.BankTransactions, 1)
-			assert.NotNil(t, current.BankTransactions[0].CompletedAt)
+			assert.False(t, current.BankTransactions[0].UpdatedAt.IsZero())
 			for _, value := range []interface{}{current, confirmed} {
 				body, err := json.Marshal(value)
 				require.NoError(t, err)
@@ -487,7 +487,7 @@ func TestPaymentIntentBankFailuresRecordCauseAndPreventResubmission(t *testing.T
 			current, err := f.service.GetPaymentIntent(context.Background(), "merchant", intent.PaymentIntentID)
 			require.NoError(t, err)
 			assert.Equal(t, result, current)
-			assert.NotNil(t, current.BankTransactions[0].CompletedAt)
+			assert.False(t, current.BankTransactions[0].UpdatedAt.IsZero())
 			assert.EqualValues(t, 1, f.bank.calls.Load())
 			assert.Len(t, f.events.events, 2)
 		})
@@ -515,7 +515,8 @@ func TestPaymentIntentInvalidDecisionAndUnexpectedBankError(t *testing.T) {
 	current, err := f.service.GetPaymentIntent(context.Background(), "merchant", intent.PaymentIntentID)
 	require.NoError(t, err)
 	assert.Equal(t, models.BankTransactionScheduled, current.BankTransactions[0].Status)
-	assert.Nil(t, current.BankTransactions[0].CompletedAt)
+	assert.Equal(t, current.BankTransactions[0].CreatedAt, current.BankTransactions[0].UpdatedAt)
+	assert.False(t, current.BankTransactions[0].UpdatedAt.IsZero())
 }
 
 func TestPaymentIntentCancellationBeforeConfirmationPreservesToken(t *testing.T) {

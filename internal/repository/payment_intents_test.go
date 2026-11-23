@@ -161,6 +161,8 @@ func TestPaymentIntentEventsTrackActualStateChangesAndTimestamps(t *testing.T) {
 
 	clock.Add(int64(time.Second))
 	first := createIntentTransaction(t, repo, intent, "first")
+	assert.Equal(t, now(), first.CreatedAt)
+	assert.Equal(t, first.CreatedAt, first.UpdatedAt)
 	clock.Add(int64(time.Second))
 	_, err = repo.CompleteBankTransaction("merchant", first.BankTransactionID, models.BankTransactionDeclined, nil)
 	require.NoError(t, err)
@@ -173,6 +175,7 @@ func TestPaymentIntentEventsTrackActualStateChangesAndTimestamps(t *testing.T) {
 	pending, err := repo.GetPaymentIntent("merchant", intent.PaymentIntentID)
 	require.NoError(t, err)
 	assert.Equal(t, now(), pending.UpdatedAt)
+	assert.Equal(t, now(), pending.BankTransactions[1].UpdatedAt)
 	require.Len(t, intentEvents.events, 5)
 
 	clock.Add(int64(time.Second))
@@ -181,6 +184,8 @@ func TestPaymentIntentEventsTrackActualStateChangesAndTimestamps(t *testing.T) {
 	stillPending, err := repo.GetPaymentIntent("merchant", intent.PaymentIntentID)
 	require.NoError(t, err)
 	assert.Equal(t, pending.UpdatedAt, stillPending.UpdatedAt)
+	assert.Equal(t, now(), stillPending.BankTransactions[1].UpdatedAt)
+	assert.Equal(t, second.CreatedAt, stillPending.BankTransactions[1].CreatedAt)
 	assert.Len(t, intentEvents.events, 5, "a changed bank uncertainty reason is not a changed intent state")
 	assert.Len(t, bankEvents.events, 5, "the independent bank event is still published")
 
@@ -191,6 +196,7 @@ func TestPaymentIntentEventsTrackActualStateChangesAndTimestamps(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, intent.CreatedAt, current.CreatedAt)
 	assert.Equal(t, now(), current.UpdatedAt)
+	assert.Equal(t, now(), current.BankTransactions[1].UpdatedAt)
 	require.Len(t, intentEvents.events, 6)
 	statuses := []models.PaymentIntentStatus{
 		models.PaymentIntentCreated, models.PaymentIntentProcessing, models.PaymentIntentDeclined,
@@ -216,6 +222,7 @@ func TestPaymentIntentEventsTrackActualStateChangesAndTimestamps(t *testing.T) {
 	clock.Add(int64(time.Minute))
 	replay := createIntent(t, repo, "merchant", "private-create-key")
 	assert.Equal(t, current.UpdatedAt, replay.UpdatedAt)
+	assert.Equal(t, current.BankTransactions, replay.BankTransactions)
 	_, _, _, err = repo.CreateBankTransaction("merchant", intent.PaymentIntentID, "first", "replay-request",
 		models.ConfirmPaymentIntentRequest{CardToken: intentCardToken}, func() (*models.CreateCardTokenRequest, error) {
 			t.Fatal("historical replay must not consume a token")
@@ -231,6 +238,7 @@ func TestPaymentIntentEventsTrackActualStateChangesAndTimestamps(t *testing.T) {
 	unchanged, err := repo.GetPaymentIntent("merchant", intent.PaymentIntentID)
 	require.NoError(t, err)
 	assert.Equal(t, current.UpdatedAt, unchanged.UpdatedAt)
+	assert.Equal(t, current.BankTransactions, unchanged.BankTransactions)
 	historicalJSON, err := json.Marshal(createdEvent)
 	require.NoError(t, err)
 	assert.Equal(t, originalEventJSON, historicalJSON)
@@ -423,20 +431,29 @@ func TestBankTransactionCompletionPublishesAtomicSnapshots(t *testing.T) {
 			completed, err := repo.CompleteBankTransaction("merchant", scheduled.BankTransactionID, status, &code)
 			require.NoError(t, err)
 			assert.Equal(t, status, completed.Status)
-			assert.Equal(t, time.Unix(0, clock.Load()).UTC(), *completed.CompletedAt)
+			assert.Equal(t, time.Unix(0, clock.Load()).UTC(), completed.UpdatedAt)
 			assert.Equal(t, scheduled.CreatedAt, completed.CreatedAt)
-			assert.Nil(t, scheduled.CompletedAt)
+			assert.Equal(t, scheduled.CreatedAt, scheduled.UpdatedAt)
 			assert.Equal(t, models.PaymentIntentCreated, intent.Status)
 			assert.Equal(t, 2, observed)
 			require.Len(t, changes.events, 2)
 			assert.Equal(t, models.BankTransactionCreated, changes.events[0].EventType)
 			assert.Empty(t, changes.events[0].Changes)
+			require.NotNil(t, changes.events[0].BankTransaction)
+			assert.Equal(t, scheduled.UpdatedAt, changes.events[0].BankTransaction.UpdatedAt)
 			update := changes.events[1]
 			assert.Nil(t, update.BankTransaction)
 			require.Len(t, update.Changes, 3)
 			assert.Equal(t, "Status", update.Changes[0].FieldName)
 			assert.JSONEq(t, `"Scheduled"`, string(update.Changes[0].OriginalValue))
 			assert.JSONEq(t, fmt.Sprintf("%q", status), string(update.Changes[0].NewValue))
+			assert.Equal(t, "UpdatedAt", update.Changes[1].FieldName)
+			before, err := json.Marshal(scheduled.UpdatedAt)
+			require.NoError(t, err)
+			after, err := json.Marshal(completed.UpdatedAt)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(before), string(update.Changes[1].OriginalValue))
+			assert.JSONEq(t, string(after), string(update.Changes[1].NewValue))
 			assert.Equal(t, "original-request", update.RequestID)
 			clock.Add(int64(time.Second))
 			replay, err := repo.CompleteBankTransaction("merchant", completed.BankTransactionID, status, &code)
@@ -447,6 +464,18 @@ func TestBankTransactionCompletionPublishesAtomicSnapshots(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestBankTransactionSameClockStatusChangeOmitsUnchangedTimestampDelta(t *testing.T) {
+	repo, changes, _ := intentRepository(t)
+	intent := createIntent(t, repo, "merchant", "create")
+	scheduled := createIntentTransaction(t, repo, intent, "pay")
+	declined, err := repo.CompleteBankTransaction("merchant", scheduled.BankTransactionID, models.BankTransactionDeclined, nil)
+	require.NoError(t, err)
+	assert.Equal(t, scheduled.UpdatedAt, declined.UpdatedAt)
+	require.Len(t, changes.events, 2)
+	require.Len(t, changes.events[1].Changes, 1)
+	assert.Equal(t, "Status", changes.events[1].Changes[0].FieldName)
 }
 
 func TestPaymentIntentHistoryCopiesAndOldOutcomesCannotRegressRetries(t *testing.T) {
@@ -484,18 +513,18 @@ func TestPaymentIntentHistoryCopiesAndOldOutcomesCannotRegressRetries(t *testing
 			require.NoError(t, err)
 			code = "mutated-input"
 			*completed.AuthorizationCode = "mutated-output"
-			*completed.CompletedAt = time.Time{}
+			completed.UpdatedAt = time.Time{}
 			snapshot.BankTransactions[0].CardNumberLastFour = "9999"
-			*declined.CompletedAt = time.Time{}
+			declined.UpdatedAt = time.Time{}
 			changes.events[0].BankTransaction.CardNumberLastFour = "8888"
 			current, err := repo.GetPaymentIntent("merchant", intent.PaymentIntentID)
 			require.NoError(t, err)
 			assert.Equal(t, models.PaymentIntentAuthorized, current.Status)
 			assert.Equal(t, models.BankTransactionScheduled, scheduled.BankTransactions[0].Status)
-			assert.Nil(t, scheduled.BankTransactions[0].CompletedAt)
+			assert.Equal(t, first.CreatedAt, scheduled.BankTransactions[0].UpdatedAt)
 			for _, transaction := range current.BankTransactions {
 				assert.Equal(t, "0007", transaction.CardNumberLastFour)
-				assert.False(t, transaction.CompletedAt.IsZero())
+				assert.False(t, transaction.UpdatedAt.IsZero())
 				if transaction.Status == models.BankTransactionAuthorized {
 					assert.Equal(t, "bank-code", *transaction.AuthorizationCode)
 				}
@@ -521,11 +550,12 @@ func TestBankTransactionTimeoutBoundaryAndLateDecisions(t *testing.T) {
 			require.NoError(t, err)
 			assert.True(t, marked)
 			require.Len(t, changes.events[1].Changes, 2)
-			assert.Equal(t, "CompletedAt", changes.events[1].Changes[1].FieldName)
+			assert.Equal(t, "UpdatedAt", changes.events[1].Changes[1].FieldName)
 			clock.Add(int64(time.Second))
 			refined, err := repo.CompleteBankTransaction("merchant", transaction.BankTransactionID, late, nil)
 			require.NoError(t, err)
 			assert.Equal(t, late, refined.Status)
+			assert.Equal(t, time.Unix(0, clock.Load()).UTC(), refined.UpdatedAt)
 			_, _, _, err = repo.CreateBankTransaction("merchant", intent.PaymentIntentID, "new", "request",
 				models.ConfirmPaymentIntentRequest{CardToken: otherIntentCardToken}, consumeIntentCard)
 			assert.ErrorIs(t, err, models.ErrIntentNotPayable)
@@ -615,7 +645,7 @@ func TestPaymentIntentReservationPublicationFailureRetainsCommittedAttempt(t *te
 	assert.Equal(t, models.PaymentIntentProcessing, stored.Status)
 	require.Len(t, stored.BankTransactions, 1)
 	assert.Equal(t, models.BankTransactionScheduled, stored.BankTransactions[0].Status)
-	assert.Nil(t, stored.BankTransactions[0].CompletedAt)
+	assert.Equal(t, stored.BankTransactions[0].CreatedAt, stored.BankTransactions[0].UpdatedAt)
 	current, attempt, card, err = repo.CreateBankTransaction("merchant", intent.PaymentIntentID, "pay", "replay", request, consume)
 	require.NoError(t, err)
 	require.NotNil(t, attempt)

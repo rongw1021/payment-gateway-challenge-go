@@ -182,7 +182,7 @@ func paymentIntentResponse(intent models.PaymentIntent) *models.PaymentIntentRes
 		transactions = append(transactions, models.BankTransactionResponse{
 			BankTransactionID: transaction.BankTransactionID, Status: transaction.Status,
 			CardNumberLastFour: transaction.CardNumberLastFour, ExpiryMonth: transaction.ExpiryMonth, ExpiryYear: transaction.ExpiryYear,
-			CreatedAt: transaction.CreatedAt, CompletedAt: transaction.CompletedAt,
+			CreatedAt: transaction.CreatedAt, UpdatedAt: transaction.UpdatedAt,
 		})
 	}
 	return &models.PaymentIntentResponse{

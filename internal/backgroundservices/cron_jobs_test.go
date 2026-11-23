@@ -102,7 +102,7 @@ func TestCronJobStartupSweepHonorsBoundaryAndBatchLimit(t *testing.T) {
 	intent, err := repo.GetPaymentIntent("merchant", first.PaymentIntentID)
 	require.NoError(t, err)
 	assert.Equal(t, models.PaymentIntentPendingVerification, intent.Status)
-	assert.Equal(t, time.Unix(0, clock.Load()).UTC(), *intent.BankTransactions[0].CompletedAt)
+	assert.Equal(t, time.Unix(0, clock.Load()).UTC(), intent.BankTransactions[0].UpdatedAt)
 	ctx, stop := context.WithTimeout(context.Background(), time.Second)
 	defer stop()
 	var last models.BankTransactionChangeEvent

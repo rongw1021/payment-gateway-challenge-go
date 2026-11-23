@@ -72,7 +72,7 @@ func (s *AuditAndReconciliationService) audit(ctx context.Context, event models.
 	safeEvent.Changes = slices.Clone(event.Changes)
 	for i := range safeEvent.Changes {
 		field := &safeEvent.Changes[i]
-		if field.FieldName != "Status" && field.FieldName != "CompletedAt" {
+		if field.FieldName != "Status" && field.FieldName != "UpdatedAt" {
 			field.OriginalValue = json.RawMessage(`"[REDACTED]"`)
 			field.NewValue = json.RawMessage(`"[REDACTED]"`)
 		}

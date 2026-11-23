@@ -568,7 +568,10 @@ func TestAPIBackgroundServicesRunAndStopWithServer(t *testing.T) {
 		serverDone <- api.Serve(ctx, listener, config.DefaultServerConfig())
 		close(serverDone)
 	}()
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
 	t.Cleanup(func() {
+		client.CloseIdleConnections()
 		cancel()
 		select {
 		case err := <-serverDone:
@@ -577,11 +580,12 @@ func TestAPIBackgroundServicesRunAndStopWithServer(t *testing.T) {
 			t.Error("API and background services did not stop")
 		}
 	})
-	client := &http.Client{Timeout: 5 * time.Second}
 	baseURL := "http://" + listener.Addr().String()
 	ping, err := client.Get(baseURL + "/ping")
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, ping.StatusCode)
+	_, err = io.Copy(io.Discard, ping.Body)
+	require.NoError(t, err)
 	require.NoError(t, ping.Body.Close())
 	request, err := http.NewRequest(http.MethodPost, baseURL+"/api/PaymentIntents/"+intent.PaymentIntentID+"/confirm",
 		strings.NewReader(`{"card_token":"`+token.Token+`"}`))
@@ -611,7 +615,7 @@ func TestAPIBackgroundServicesRunAndStopWithServer(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, pending.BankTransactions, 1)
 	assert.Equal(t, models.BankTransactionStatusUpdateTimeout, pending.BankTransactions[0].Status)
-	assert.NotNil(t, pending.BankTransactions[0].CompletedAt)
+	assert.False(t, pending.BankTransactions[0].UpdatedAt.IsZero())
 	for _, eventType := range []models.BankTransactionEventType{models.BankTransactionCreated, models.BankTransactionUpdated} {
 		select {
 		case event := <-capture.consumed:
@@ -644,6 +648,9 @@ func TestAPIBackgroundServicesRunAndStopWithServer(t *testing.T) {
 	require.Equal(t, http.StatusOK, result.response.StatusCode)
 	var completed models.PaymentIntentResponse
 	require.NoError(t, json.NewDecoder(result.response.Body).Decode(&completed))
+	_, err = io.Copy(io.Discard, result.response.Body)
+	require.NoError(t, err)
+	require.NoError(t, result.response.Body.Close())
 	assert.Equal(t, models.PaymentIntentAuthorized, completed.Status)
 	assert.Equal(t, pending.BankTransactions[0].BankTransactionID, completed.BankTransactions[0].BankTransactionID)
 	assert.EqualValues(t, 1, bankCalls.Load())
@@ -654,6 +661,8 @@ func TestAPIBackgroundServicesRunAndStopWithServer(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("audit and webhook worker did not consume the late completion event")
 	}
+	// Close spare pooled connections before measuring server/worker shutdown.
+	client.CloseIdleConnections()
 	cancel()
 	select {
 	case err := <-serverDone:
