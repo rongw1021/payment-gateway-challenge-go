@@ -147,14 +147,14 @@ sequenceDiagram
     Merchant->>Merchant: Validate order<br/>Determine amount and currency
 
     Note over Merchant,Gateway: Create the payment intent
-    Merchant->>LB: POST /api/PaymentIntents<br/>Amount, currency + creation key
+    Merchant->>LB: POST /api/PaymentIntents<br/>Amount, currency + creation idempotency key
     LB->>Gateway: Create payment intent
     Gateway->>Gateway: Create intent in Created state
     Gateway-->>LB: Created intent + intent ID
     LB-->>Merchant: Created intent + intent ID
 
     Note over Merchant,Bank: Confirm and authorize
-    Merchant->>LB: POST /api/PaymentIntents/{id}/confirm<br/>Card token + confirmation key
+    Merchant->>LB: POST /api/PaymentIntents/{id}/confirm<br/>Card token + confirmation idempotency key
     LB->>Gateway: Confirm payment intent
     Gateway->>Gateway: Consume token and reserve Scheduled attempt<br/>Created to Processing
     Gateway->>Bank: Authorize card for the intent's amount and currency
@@ -277,7 +277,7 @@ amount and currency, current business state, and attempt history.
 | `CreatedAt` | `time.Time` | Immutable UTC time the intent was created. | Yes |
 | `UpdatedAt` | `time.Time` | UTC time of the latest intent status change; initially equal to `CreatedAt`. | Yes |
 | `IdempotencyKey` | `string` | Merchant-scoped creation idempotency key, allowing repeated creation requests to resolve to the same intent. | No |
-| `RequestFingerprint` | `string` | HMAC-SHA256 fingerprint of the creation request's amount and currency; detects changed input under an existing creation key. | No |
+| `RequestFingerprint` | `string` | HMAC-SHA256 fingerprint of the creation request's amount and currency; detects changed input under an existing creation idempotency key. | No |
 | `BankTransactions` | `[]BankTransaction` | Associated authorization attempts, returned oldest first; empty before the first attempt. | Yes, using the public transaction fields below |
 
 Reads, rejected requests, and idempotent replays do not advance these timestamps.
@@ -302,7 +302,7 @@ card snapshot contains neither PAN/CVV nor the card token.
 | `CreatedAt` | `time.Time` | UTC time the attempt was reserved; also used to detect locally stalled attempts. | Yes |
 | `UpdatedAt` | `time.Time` | UTC time of the latest attempt status change; initially equals `CreatedAt`, including while `Scheduled`. Reads and replays leave it unchanged. | Yes |
 | `IdempotencyKey` | `string` | Merchant-scoped confirmation idempotency key; matching replays reuse this attempt rather than submitting another bank request. | No |
-| `RequestFingerprint` | `string` | HMAC-SHA256 fingerprint binding the confirmation to its intent ID and card token; detects conflicting reuse of the confirmation key. | No |
+| `RequestFingerprint` | `string` | HMAC-SHA256 fingerprint binding the confirmation to its intent ID and card token; detects conflicting reuse of the confirmation idempotency key. | No |
 | `OriginatingRequestID` | `string` | Identifies the confirmation request that first reserved the attempt; retained for correlation, including subsequent change events. | No |
 | `AuthorizationCode` | `*string` | Optional bank-supplied code; a nonblank value is required for a successful authorization. Retained internally, not returned to the merchant. | No |
 
@@ -333,9 +333,9 @@ authorization attempt:
   keys, so retrying checkout setup does not itself submit a payment, while a
   matching confirmation replay reuses the existing attempt.
 - **One payment, multiple attempts:** after a definitive decline, the merchant
-  can confirm the same intent with a new card token and key, retaining the payment
-  identity and complete history. Processing, authorized, and uncertain outcomes
-  still block new attempts.
+  can confirm the same intent with a new card token and confirmation idempotency
+  key, retaining the payment identity and complete history. Processing, authorized,
+  and uncertain outcomes still block new attempts.
 
 This is a design choice rather than a requirement of the assessment. It adds an
 API call and allows intents that are never confirmed; duplicate-submission
@@ -344,7 +344,8 @@ endpoints alone.
 
 For a new confirmation:
 
-1. Check merchant ownership and whether the key identifies a replay or conflict.
+1. Check merchant ownership and whether the confirmation idempotency key
+   identifies a replay or conflict.
 2. Check whether the intent permits a new attempt.
 3. Consume the token and reserve a `Scheduled` bank transaction, moving the intent
    to `Processing`.
@@ -416,21 +417,23 @@ settlement or that the bank did not process a request.
 ### Idempotency and replay semantics
 
 Idempotency prevents repeated side effects, rather than caching an immutable HTTP
-response. Creation and confirmation use separate merchant-scoped key namespaces.
+response. Creation and confirmation use separate merchant-scoped idempotency
+namespaces.
 
 | Operation | Fingerprinted request |
 |-----------|-----------------------|
 | Intent creation | Currency and amount |
 | Confirmation | Intent ID and card token |
 
-Fingerprints use HMAC-SHA256 over the typed request data, with an in-memory
-repository key. A matching key and fingerprint return the current snapshot.
-Different details under a previously reserved key produce a conflict.
+Fingerprints use HMAC-SHA256 over the typed request data, with a
+repository-generated HMAC secret held only in memory. A matching idempotency key
+and request fingerprint return the current snapshot. Different details under a
+previously reserved idempotency key produce a conflict.
 
 Confirmation replay is checked before token availability and payability. Therefore
 a matching retry can succeed after token consumption or expiry without consuming
 another token or submitting another bank request. Validation failures that precede
-reservation do not permanently reserve the key.
+reservation do not permanently reserve the confirmation idempotency key.
 
 Responses describe the **current intent**, including later history:
 
@@ -445,10 +448,10 @@ returns the authorized intent. The old attempt remains declined in history.
 Clients must not interpret the aggregate status as a changed outcome for that
 specific old attempt.
 
-Idempotency records, fingerprints, and keys are not durable. These semantics do
-not provide exactly-once execution across crashes, restarts, or multiple gateway
-instances, and the bank protocol does not provide a coordinated transaction with
-local storage.
+Idempotency records, request fingerprints, and the repository's HMAC secret are
+not durable. These semantics do not provide exactly-once execution across crashes,
+restarts, or multiple gateway instances, and the bank protocol does not provide a
+coordinated transaction with local storage.
 
 ## 6. Bank Integration and Uncertain Outcomes
 
@@ -474,9 +477,10 @@ forwarding card data to a redirected destination.
 ### Uncertain outcomes
 
 - **Declined:** the bank provided a valid, definitive refusal. The merchant may
-  create a new attempt using a new token/key.
-- **Pending verification:** the outcome is uncertain. Retrying under a new key
-  could duplicate a real bank operation, so the intent is blocked from new attempts.
+  create a new attempt using a new card token and confirmation idempotency key.
+- **Pending verification:** the outcome is uncertain. Retrying under a new
+  confirmation idempotency key could duplicate a real bank operation, so the intent
+  is blocked from new attempts.
 
 Likewise, client cancellation is not evidence that the bank stopped processing.
 The service records recognized uncertain outcomes when possible, although a
@@ -652,8 +656,8 @@ attributes rather than interpolated into message text. Audit messages deliberate
 retain the serialized event, with selected fields also promoted for filtering.
 
 Request IDs connect HTTP logs with both event streams. Replays receive new request
-IDs, while attempt-driven events retain the originating confirmation's ID. Metric
-dimensions exclude high-cardinality request and transaction identifiers.
+IDs, while attempt-driven events retain the originating confirmation request ID.
+Metric dimensions exclude high-cardinality request and transaction identifiers.
 
 Export is best effort. Queues can overflow, failed delta exports can undercount
 metrics, and shutdown may leave telemetry undelivered. Telemetry is therefore

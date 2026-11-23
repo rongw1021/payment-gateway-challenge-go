@@ -189,8 +189,8 @@
 
     <g class="node" id="token-repository">
       <rect x="280" y="1094" width="194" height="76" rx="8" fill="#ffffff" stroke="#fdba74" stroke-width="1.5"/>
-      <text x="377" y="1120" text-anchor="middle" class="node-title">Token repository</text>
-      <text x="377" y="1142" text-anchor="middle" class="node-detail">Token hashes</text>
+      <text x="377" y="1120" text-anchor="middle" class="node-title">Card token repository</text>
+      <text x="377" y="1142" text-anchor="middle" class="node-detail">Card token hashes</text>
       <text x="377" y="1160" text-anchor="middle" class="node-detail">Transient card data</text>
     </g>
     <g class="node" id="payment-repository">
